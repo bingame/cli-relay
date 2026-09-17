@@ -1,0 +1,261 @@
+// Package claudecode 实现不向配置产物写入凭据的 Claude Code 启动适配器。
+package claudecode
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"relay/internal/adapter"
+	"relay/internal/provider"
+	"relay/internal/safeio"
+)
+
+type Adapter struct{ Binary string }
+
+var _ adapter.LaunchAdapter = (*Adapter)(nil)
+
+func New() *Adapter             { return &Adapter{Binary: "claude"} }
+func (*Adapter) Target() string { return "claude-code" }
+
+func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifact, error) {
+	if err := p.Validate(); err != nil {
+		return adapter.Artifact{}, err
+	}
+	if !p.Supports(a.Target()) {
+		return adapter.Artifact{}, fmt.Errorf("供应商不支持 Claude Code")
+	}
+	settings := map[string]any{}
+	if raw, ok := p.Extra["claude_settings"]; ok {
+		data, err := json.Marshal(raw)
+		if err != nil {
+			return adapter.Artifact{}, fmt.Errorf("Claude Code settings 无法编码")
+		}
+		if err = json.Unmarshal(data, &settings); err != nil || settings == nil {
+			return adapter.Artifact{}, fmt.Errorf("claude_settings 必须是 JSON 对象")
+		}
+	}
+	if err := validateSettings(settings); err != nil {
+		return adapter.Artifact{}, err
+	}
+	env, _ := settings["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+	}
+	if p.BaseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = p.BaseURL
+	}
+	if p.Model != "" {
+		env["ANTHROPIC_MODEL"] = p.Model
+		settings["model"] = p.Model
+	}
+	if len(env) > 0 {
+		settings["env"] = env
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return adapter.Artifact{}, fmt.Errorf("无法编码 Claude Code 配置")
+	}
+	data = append(data, '\n')
+	path, err := filepath.Abs(filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".json"))
+	if err != nil {
+		return adapter.Artifact{}, fmt.Errorf("无法解析渲染路径: %w", err)
+	}
+	if err := safeio.WriteFile(path, data, 0600); err != nil {
+		return adapter.Artifact{}, err
+	}
+	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: data, Config: settings, EnvKey: "ANTHROPIC_AUTH_TOKEN"}, nil
+}
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// 清除继承的身份、模型与第三方路由，避免上一供应商污染本次启动。
+var providerEnv = []string{
+	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+	"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+}
+
+func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
+	settings, err := artifactSettings(artifact)
+	if err != nil {
+		return adapter.LaunchInputs{}, err
+	}
+	if artifact.Path == "" {
+		return adapter.LaunchInputs{}, fmt.Errorf("Claude Code 渲染文件路径不能为空")
+	}
+	env := map[string]string{}
+	if values, ok := settings["env"].(map[string]any); ok {
+		for name, value := range values {
+			env[name] = value.(string)
+		}
+	}
+	if key := secrets["api_key"]; key != "" {
+		name := secrets["api_key_env"]
+		if name == "" {
+			name = "ANTHROPIC_AUTH_TOKEN"
+		}
+		if name != "ANTHROPIC_AUTH_TOKEN" && name != "ANTHROPIC_API_KEY" {
+			return adapter.LaunchInputs{}, fmt.Errorf("不支持的 Claude Code 鉴权环境名")
+		}
+		env[name] = key
+	}
+	for name, value := range secrets {
+		if !strings.HasPrefix(name, "env:") {
+			continue
+		}
+		name = strings.TrimPrefix(name, "env:")
+		if !envName.MatchString(name) || strings.ContainsRune(value, '\x00') || (name != "ANTHROPIC_CUSTOM_HEADERS" && strings.ContainsAny(value, "\r\n")) {
+			return adapter.LaunchInputs{}, fmt.Errorf("无效的凭据环境变量")
+		}
+		if old, exists := env[name]; exists && old != value {
+			return adapter.LaunchInputs{}, fmt.Errorf("凭据环境变量 %s 存在冲突", name)
+		}
+		env[name] = value
+	}
+	for name, value := range env {
+		if strings.ContainsRune(value, '\x00') || (name != "ANTHROPIC_CUSTOM_HEADERS" && strings.ContainsAny(value, "\r\n")) {
+			return adapter.LaunchInputs{}, fmt.Errorf("环境变量不能包含换行或 NUL")
+		}
+	}
+	if env["ANTHROPIC_AUTH_TOKEN"] != "" && env["ANTHROPIC_API_KEY"] != "" {
+		return adapter.LaunchInputs{}, fmt.Errorf("Claude Code 不能同时注入 AUTH_TOKEN 和 API_KEY")
+	}
+	binary := a.Binary
+	if binary == "" {
+		binary = "claude"
+	}
+	return adapter.LaunchInputs{Binary: binary, Args: []string{"--setting-sources", "", "--settings", artifact.Path}, Env: env, UnsetEnv: append([]string(nil), providerEnv...)}, nil
+}
+
+func (*Adapter) NativeArgs(mode adapter.Mode, args []string) ([]string, error) {
+	if mode != adapter.Headless && mode != adapter.Interactive {
+		return nil, fmt.Errorf("未知的 Claude Code 启动模式")
+	}
+	remaining := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			remaining = append(remaining, args[i:]...)
+			break
+		}
+		name, value, hasValue := strings.Cut(arg, "=")
+		if name == "--settings" || name == "--setting-sources" {
+			return nil, fmt.Errorf("%s 由 Relay 管理，请通过供应商配置设置", name)
+		}
+		if mode == adapter.Interactive {
+			remaining = append(remaining, arg)
+			continue
+		}
+		switch name {
+		case "-p", "--print", "--verbose":
+			if hasValue {
+				return nil, fmt.Errorf("%s 不接受参数值", name)
+			}
+		case "--output-format":
+			if !hasValue {
+				i++
+				if i >= len(args) {
+					return nil, fmt.Errorf("--output-format 缺少参数")
+				}
+				value = args[i]
+			}
+			if value != "stream-json" {
+				return nil, fmt.Errorf("relay exec 要求 --output-format stream-json")
+			}
+		default:
+			remaining = append(remaining, arg)
+		}
+	}
+	if mode == adapter.Headless {
+		return append([]string{"-p", "--verbose", "--output-format", "stream-json"}, remaining...), nil
+	}
+	return remaining, nil
+}
+
+func (*Adapter) ResumeArgs(id string) []string { return []string{"--resume", id} }
+
+func artifactSettings(artifact adapter.Artifact) (map[string]any, error) {
+	if artifact.Target != "claude-code" || !provider.ValidID(artifact.ProviderID) {
+		return nil, fmt.Errorf("无效的 Claude Code 渲染产物")
+	}
+	var settings map[string]any
+	if len(artifact.Content) != 0 {
+		if err := json.Unmarshal(artifact.Content, &settings); err != nil {
+			return nil, fmt.Errorf("Claude Code 渲染产物不是合法 JSON")
+		}
+	} else {
+		data, err := json.Marshal(artifact.Config)
+		if err != nil {
+			return nil, fmt.Errorf("无法读取 Claude Code 配置")
+		}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return nil, fmt.Errorf("无法读取 Claude Code 配置")
+		}
+	}
+	if settings == nil {
+		return nil, fmt.Errorf("Claude Code 配置必须是对象")
+	}
+	if err := validateSettings(settings); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+func validateSettings(settings map[string]any) error {
+	if err := rejectCredentialFields(settings); err != nil {
+		return err
+	}
+	if value, exists := settings["env"]; exists {
+		env, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("Claude Code settings.env 必须是对象")
+		}
+		for name, value := range env {
+			if _, ok := value.(string); !ok || !envName.MatchString(name) {
+				return fmt.Errorf("Claude Code settings.env 必须是合法变量名到字符串的映射")
+			}
+		}
+	}
+	return nil
+}
+
+func rejectCredentialFields(value any) error {
+	switch value := value.(type) {
+	case map[string]any:
+		for key, child := range value {
+			upper := strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
+			for _, marker := range []string{"API_KEY", "APIKEY", "_TOKEN", "ACCESS_KEY", "SECRET", "PASSWORD", "PRIVATE_KEY", "AUTHORIZATION", "CUSTOM_HEADERS", "CREDENTIAL"} {
+				if strings.Contains(upper, marker) {
+					return fmt.Errorf("Claude Code 配置不能包含凭据字段；请使用加密凭据存储")
+				}
+			}
+			if err := rejectCredentialFields(child); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if err := rejectCredentialFields(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func canonical(value any) []byte { encoded, _ := json.Marshal(value); return encoded }
+func equalJSON(a, b any) bool    { return bytes.Equal(canonical(a), canonical(b)) }
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
