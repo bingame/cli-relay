@@ -15,10 +15,10 @@ gh release download --repo bingame/cli-relay --pattern install.sh --output - | R
 ```
 
 ```powershell
-$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | iex
+$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | Out-String | iex
 ```
 
-PowerShell 安装器保持纯 ASCII 源码，避免 `gh --output -` 进入原生管道时按系统代码页错误解码 UTF-8 中文并破坏脚本语法。私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
+`Out-String` 不能省略：`gh --output -` 通过 PowerShell 原生管道输出时会产生多个逐行字符串对象，直接传给 `iex` 会逐行执行，多行函数尚未闭合时就会报“缺少右大括号”。`Out-String` 先把所有行聚合成一个完整脚本。PowerShell 安装器同时保持纯 ASCII 源码，避免原生管道按系统代码页错误解码 UTF-8 中文。私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
 
 Linux / macOS（公开发行后可直接使用仓库地址）：
 

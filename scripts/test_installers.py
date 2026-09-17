@@ -46,7 +46,7 @@ def main():
             asset = 'relay-windows-amd64.exe'
             shutil.copyfile(binary, fixtures / asset)
             target = root / 'Relay' / 'bin' / 'relay.exe'
-            # 脚本及测试 wrapper 均从 UTF-8 显式解码，兼容 Windows PowerShell 5.1。
+            # ReadAllLines 先关闭文件，再模拟 gh 原生管道的逐行字符串输出；Out-String 必须聚合完整脚本。
             wrapper = root / 'test.ps1'
             wrapper.write_text('''$ErrorActionPreference = 'Stop'
 function Invoke-RestMethod { param($Uri, $TimeoutSec) return @{ tag_name = 'v0.1.0' } }
@@ -63,7 +63,7 @@ function Invoke-WebRequest {
     Copy-Item -LiteralPath (Join-Path $env:RELAY_TEST_FIXTURES $name) -Destination $OutFile
 }
 try {
-    Invoke-Expression ([IO.File]::ReadAllText($env:RELAY_TEST_INSTALLER, [Text.Encoding]::UTF8))
+    [IO.File]::ReadAllLines($env:RELAY_TEST_INSTALLER, [Text.Encoding]::ASCII) | Out-String | Invoke-Expression
 } catch { Write-Error $_; exit 1 }
 ''', encoding='utf-8')
             env['RELAY_TEST_INSTALLER'] = str(REPO / 'install.ps1')
