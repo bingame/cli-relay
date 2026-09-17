@@ -10,7 +10,9 @@
 - 修复 Claude 隔离设置关闭用户 Skill 发现的问题：只额外加载 Relay 内嵌 Handoff 插件，保留供应商隔离。真实 Claude + 本地假服务验证 Skill 可见且使用正确的虚构凭据；复现入口 `scripts/verify_claude_skill.py`。
 - Go 模块路径改为 `github.com/bingame/cli-relay`，支持正常模块安装；增加发布版本输出。更新规范、README、Adapter NOTES 与发布说明。
 
-本地验收：Windows `go test ./...` / `go vet ./...`，GoReleaser `check` / 五平台 snapshot，发行产物及软件源校验和核对，Windows PowerShell 安装器回归，WSL Linux 安装器/CLI/Skill 测试与 ShellCheck，Skill 格式校验，工作流 Actionlint 检查。Linux amd64 产物确认为静态链接。macOS 原生执行和 Linux race 检查由新增 CI 完成，本地没有 macOS 真机。
+本地验收：Windows `go test ./...` / `go vet ./...`，GoReleaser `check` / 五平台 snapshot，发行产物及软件源校验和核对，Windows PowerShell 5.1/7 安装器回归，WSL Linux 安装器/CLI/Skill 测试与 ShellCheck，Skill 格式校验，工作流 Actionlint 检查。Linux amd64 产物确认为静态链接。
+
+GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平台打包检查。Windows runner 发现历史 SQL fixture 被 Git 的 autocrlf 改写，导致多行原文保真断言失败；已为 `.sql` 固定 LF，保持测试原文与版本库字节一致，未放宽导入器的保真要求。
 
 ## 阶段
 

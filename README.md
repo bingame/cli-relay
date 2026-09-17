@@ -220,6 +220,6 @@ python -X utf8 scripts/verify_codex_relay.py
 python -X utf8 scripts/verify_claude_skill.py --relay bin/relay.exe --claude path/to/claude.exe
 ```
 
-另外在 WSL Ubuntu 20.04 实际执行了 Linux 进程与 CLI 测试，验证 Unix `run` 替换进程后 PID 保持不变且保留原生退出码；macOS 目前仅完成交叉构建，未做原机运行验证。
+另外在 WSL Ubuntu 20.04 实际执行了 Linux 进程与 CLI 测试，验证 Unix `run` 替换进程后 PID 保持不变且保留原生退出码。新增 GitHub Actions 覆盖 Windows/Linux/macOS 原生测试与安装器验收；macOS 原生验证及 Linux race 检查已通过。
 
 没有对真实 Multica 服务创建 agent，也没有使用真实供应商发出付费请求。集成验证覆盖本地源码接口、原生 Codex 加本地假服务及模拟子进程。
