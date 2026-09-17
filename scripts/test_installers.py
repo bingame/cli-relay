@@ -31,6 +31,8 @@ def main():
         root = Path(temp)
         fixtures = root / 'downloads'
         fixtures.mkdir()
+        check(all(byte < 128 for byte in (REPO / 'install.ps1').read_bytes()),
+              'install.ps1 必须保持纯 ASCII，避免 PowerShell 原生管道按系统代码页解码时损坏')
         env = {k: v for k, v in os.environ.items() if k.upper() in {
             'SYSTEMROOT', 'WINDIR', 'PATH', 'PATHEXT', 'COMSPEC', 'TEMP', 'TMP',
             'PROCESSOR_ARCHITECTURE', 'PROCESSOR_ARCHITEW6432'}}

@@ -15,10 +15,10 @@ gh release download --repo bingame/cli-relay --pattern install.sh --output - | R
 ```
 
 ```powershell
-$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | Out-String | iex
+$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | iex
 ```
 
-私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
+PowerShell 安装器保持纯 ASCII 源码，避免 `gh --output -` 进入原生管道时按系统代码页错误解码 UTF-8 中文并破坏脚本语法。私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
 
 Linux / macOS（公开发行后可直接使用仓库地址）：
 
@@ -32,7 +32,7 @@ Windows PowerShell：
 irm https://github.com/bingame/cli-relay/releases/latest/download/install.ps1 | iex
 ```
 
-`get.relay.sh` 完成域名部署后，入口可缩短为 `curl -fsSL https://get.relay.sh | sh` 和 `irm https://get.relay.sh/install.ps1 | iex`。Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。
+Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。
 
 已有 Homebrew/Scoop 的用户，在软件源完成配置后可使用：
 
