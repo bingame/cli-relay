@@ -2,6 +2,16 @@
 
 日期：2026-09-17。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
 
+## 安装与分发补充
+
+- 增加 GoReleaser v2.9.0 配置、三系统 CI 和 tag 发布工作流；五平台 CGO=0 归档、Windows 裸 exe、SHA-256、Homebrew formula、Scoop manifest 由同一配置生成。版本固定原因见 `distribution/NOTES.md`。
+- 一行安装器支持公开 HTTPS 和现有私有仓库的 `RELAY_DOWNLOAD_MODE=gh`；先校验再原子替换，PATH 配置、升级、自动 Skill 安装都有明确失败行为。用户已确认先使用现有 `bingame/cli-relay`，不要求新域名上线。
+- `InstallSkill(targetDir string) error` 加入两个 Adapter；`relay skill install [--cli claude-code,codex]` 自动探测、离线安装，支持原生配置目录覆盖、幂等升级和用户修改保护，不初始化数据库或凭据库。
+- 修复 Claude 隔离设置关闭用户 Skill 发现的问题：只额外加载 Relay 内嵌 Handoff 插件，保留供应商隔离。真实 Claude + 本地假服务验证 Skill 可见且使用正确的虚构凭据；复现入口 `scripts/verify_claude_skill.py`。
+- Go 模块路径改为 `github.com/bingame/cli-relay`，支持正常模块安装；增加发布版本输出。更新规范、README、Adapter NOTES 与发布说明。
+
+本地验收：Windows `go test ./...` / `go vet ./...`，GoReleaser `check` / 五平台 snapshot，发行产物及软件源校验和核对，Windows PowerShell 安装器回归，WSL Linux 安装器/CLI/Skill 测试与 ShellCheck，Skill 格式校验，工作流 Actionlint 检查。Linux amd64 产物确认为静态链接。macOS 原生执行和 Linux race 检查由新增 CI 完成，本地没有 macOS 真机。
+
 ## 阶段
 
 | 阶段 | 交付 |

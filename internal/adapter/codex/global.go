@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/safeio"
 	"github.com/gofrs/flock"
 	"github.com/pelletier/go-toml/v2"
 	"github.com/pelletier/go-toml/v2/unstable"
-	"relay/internal/adapter"
-	"relay/internal/safeio"
 )
 
 func profileContent(id string, content []byte) []byte {

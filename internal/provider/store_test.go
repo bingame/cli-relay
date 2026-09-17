@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"relay/internal/secrets"
+	"github.com/bingame/cli-relay/internal/secrets"
 )
 
 func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {

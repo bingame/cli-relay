@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"relay/internal/provider"
-	"relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
 
 	"github.com/pelletier/go-toml/v2"
 	"modernc.org/sqlite"

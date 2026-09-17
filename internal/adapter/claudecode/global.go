@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/safeio"
 	"github.com/gofrs/flock"
-	"relay/internal/adapter"
-	"relay/internal/safeio"
 )
 
 const managedFile = ".relay-managed.json"

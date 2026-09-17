@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/provider"
 	"github.com/pelletier/go-toml/v2"
-	"relay/internal/adapter"
-	"relay/internal/provider"
 )
 
 func sampleProvider() provider.Provider {

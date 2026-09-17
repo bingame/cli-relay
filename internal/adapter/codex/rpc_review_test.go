@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/adapter"
-	"relay/internal/handoff"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/handoff"
 )
 
 func TestReviewRPCHelper(t *testing.T) {

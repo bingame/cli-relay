@@ -8,10 +8,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/importer/ccswitch"
+	"github.com/bingame/cli-relay/internal/provider"
 	"github.com/spf13/cobra"
-	"relay/internal/adapter"
-	"relay/internal/importer/ccswitch"
-	"relay/internal/provider"
 )
 
 func (a *App) providerCommand() *cobra.Command {

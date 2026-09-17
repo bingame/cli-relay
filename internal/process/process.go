@@ -18,12 +18,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/classify"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/secrets"
 	"golang.org/x/term"
-	"relay/internal/adapter"
-	"relay/internal/classify"
-	"relay/internal/provider"
-	"relay/internal/safeio"
-	"relay/internal/secrets"
 )
 
 type Session struct {

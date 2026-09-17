@@ -12,10 +12,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
 	"github.com/pelletier/go-toml/v2"
-	"relay/internal/adapter"
-	"relay/internal/provider"
-	"relay/internal/safeio"
 )
 
 // Adapter 使用原生参数和环境启动 Codex；默认无需安装全局配置。

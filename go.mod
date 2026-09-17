@@ -1,4 +1,4 @@
-module relay
+module github.com/bingame/cli-relay
 
 go 1.26.0
 

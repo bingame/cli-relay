@@ -1,5 +1,11 @@
 # Codex 参数验证记录
 
+## Skill 安装与发现（补充）
+
+2026-09-17 获取 [OpenAI Agent Skills 官方文档](https://developers.openai.com/codex/skills/)：Codex 原生支持包含 name/description frontmatter 的 `SKILL.md`，文档当前推荐用户路径 `$HOME/.agents/skills`。不能再声称 Codex 没有原生 Skill。
+
+本机 Codex 0.154.0 的 `app-server skills/list` 实测：临时 `$CODEX_HOME/skills/relay-probe-codex/SKILL.md` 被列为 `scope=user`、`enabled=true`。因此按产品指定路径安装到 `$CODEX_HOME/skills/relay-handoff`（未设置时 `~/.codex/skills`），不另外创建可能重复发现的 `.agents` 副本。探针只创建临时目录、初始化 RPC 并列 Skill，不请求模型、不修改真实配置；Windows 的 Codex 仍可能从系统用户目录只读扫描其他已有 skills，这不代表环境变量改变了所有原生扫描根。
+
 验证时间：2026-09-17；本机 `codex-cli 0.154.0`，Go 1.26.4，Windows amd64。
 
 ## 实测结果

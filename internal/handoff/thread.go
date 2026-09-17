@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"relay/internal/adapter"
-	"relay/internal/process"
-	"relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/process"
+	"github.com/bingame/cli-relay/internal/provider"
 )
 
 // ReadCodexThread 优先通过官方 app-server 读取结构化历史，不启动模型回合。

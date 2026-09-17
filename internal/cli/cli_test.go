@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/adapter"
-	"relay/internal/adapter/mock"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter/mock"
 )
 
 func command(t *testing.T, home, input string, args ...string) (string, error) {

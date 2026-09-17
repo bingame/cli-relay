@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/bingame/cli-relay/internal/cli"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"relay/internal/cli"
 	"strings"
 	"syscall"
 )

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter"
 )
 
 func TestReplacePreservesPIDAndExitCode(t *testing.T) {

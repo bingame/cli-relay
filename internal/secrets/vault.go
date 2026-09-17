@@ -16,9 +16,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/safeio"
 	"github.com/zalando/go-keyring"
 	"golang.org/x/crypto/argon2"
-	"relay/internal/safeio"
 )
 
 type Vault struct{ aead cipher.AEAD }

@@ -10,8 +10,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/bingame/cli-relay/internal/provider"
 	"gopkg.in/yaml.v3"
-	"relay/internal/provider"
 )
 
 var SectionTitles = []string{"目标", "已完成", "进行中 / 当前状态", "关键决策", "文件与代码状态", "硬约束（不可压缩，必须原样保留）", "环境依赖声明", "下一步计划"}

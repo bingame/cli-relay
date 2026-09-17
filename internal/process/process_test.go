@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter"
 )
 
 func TestHelperProcess(t *testing.T) {

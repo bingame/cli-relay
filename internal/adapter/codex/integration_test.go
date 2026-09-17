@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter"
 )
 
 // 显式开启才调用本机 Codex；模型请求只访问 127.0.0.1 假 SSE 服务。

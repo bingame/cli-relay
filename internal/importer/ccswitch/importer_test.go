@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/provider"
 )
 
 func TestParseRealisticDump(t *testing.T) {

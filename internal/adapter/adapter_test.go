@@ -1,9 +1,9 @@
 package adapter_test
 
 import (
-	"relay/internal/adapter"
-	"relay/internal/adapter/mock"
-	"relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter/mock"
+	"github.com/bingame/cli-relay/internal/provider"
 	"testing"
 )
 

@@ -1,0 +1,82 @@
+version: 2
+project_name: relay
+
+builds:
+  - id: relay
+    main: ./cmd/relay
+    binary: relay
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/bingame/cli-relay/internal/version.Version={{.Version}}
+
+archives:
+  - id: packages
+    ids: [relay]
+    name_template: 'relay-{{ .Os }}-{{ .Arch }}'
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+  - id: windows-binary
+    ids: [relay]
+    name_template: 'relay-{{ .Os }}-{{ .Arch }}'
+    formats: [binary]
+    # binary 格式会为每个目标生成独立裸二进制；安装器使用 Windows 产物。
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  github:
+    owner: bingame
+    name: cli-relay
+  prerelease: auto
+  extra_files:
+    - glob: install.sh
+    - glob: install.ps1
+    - glob: dist/homebrew/Formula/relay.rb
+    - glob: dist/scoop/relay.json
+
+changelog:
+  sort: asc
+
+brews:
+  - name: relay
+    ids: [packages]
+    repository:
+      owner: '{{ if (index .Env "HOMEBREW_TAP_OWNER") }}{{ (index .Env "HOMEBREW_TAP_OWNER") }}{{ else }}bingame{{ end }}'
+      name: '{{ if (index .Env "HOMEBREW_TAP_REPO") }}{{ (index .Env "HOMEBREW_TAP_REPO") }}{{ else }}homebrew-tap{{ end }}'
+      token: '{{ (index .Env "PACKAGE_REPO_TOKEN") }}'
+    directory: Formula
+    homepage: https://github.com/bingame/cli-relay
+    description: '为 AI Agent CLI 选择供应商并交接会话'
+    skip_upload: '{{ if (index .Env "PACKAGE_REPO_TOKEN") }}auto{{ else }}true{{ end }}'
+    install: |
+      bin.install "relay"
+    post_install: |
+      system bin/"relay", "skill", "install"
+    test: |
+      system bin/"relay", "--version"
+
+scoops:
+  - name: relay
+    ids: [packages]
+    repository:
+      owner: '{{ if (index .Env "SCOOP_BUCKET_OWNER") }}{{ (index .Env "SCOOP_BUCKET_OWNER") }}{{ else }}bingame{{ end }}'
+      name: '{{ if (index .Env "SCOOP_BUCKET_REPO") }}{{ (index .Env "SCOOP_BUCKET_REPO") }}{{ else }}scoop-bucket{{ end }}'
+      token: '{{ (index .Env "PACKAGE_REPO_TOKEN") }}'
+    homepage: https://github.com/bingame/cli-relay
+    description: '为 AI Agent CLI 选择供应商并交接会话'
+    skip_upload: '{{ if (index .Env "PACKAGE_REPO_TOKEN") }}auto{{ else }}true{{ end }}'
+    post_install:
+      - '& "$dir\relay.exe" skill install'
+      - 'if ($LASTEXITCODE -ne 0) { throw "Relay Skill installation failed; run relay skill install after resolving the error" }'

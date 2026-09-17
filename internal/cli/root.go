@@ -10,15 +10,16 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter/claudecode"
+	"github.com/bingame/cli-relay/internal/adapter/codex"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/secrets"
+	"github.com/bingame/cli-relay/internal/version"
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	"relay/internal/adapter"
-	"relay/internal/adapter/claudecode"
-	"relay/internal/adapter/codex"
-	"relay/internal/provider"
-	"relay/internal/safeio"
-	"relay/internal/secrets"
 )
 
 type App struct {
@@ -60,11 +61,13 @@ func NewRootWithApp(a *App) *cobra.Command {
 		a.Adapters = map[string]adapter.LaunchAdapter{"claude-code": c, "codex": x}
 	}
 	cmd := &cobra.Command{Use: "relay", Short: "为 AI Agent CLI 选择供应商并交接会话", SilenceUsage: true, SilenceErrors: true}
+	cmd.Version = version.String()
+	cmd.SetVersionTemplate("relay {{.Version}}\n")
 	cmd.PersistentFlags().StringVar(&a.Home, "home", a.Home, "Relay 数据目录（默认 ~/.relay）")
 	if x, ok := a.Adapters["codex"].(*codex.Adapter); ok {
 		cmd.PersistentFlags().StringVar(&x.LaunchMode, "codex-launch-mode", x.LaunchMode, "Codex 配置方式：override 或 profile（profile 需先 switch）")
 	}
-	cmd.AddCommand(a.providerCommand(), a.switchCommand(), a.launchCommand(adapter.Interactive), a.launchCommand(adapter.Headless), a.statusCommand(), a.handoffCommand())
+	cmd.AddCommand(a.providerCommand(), a.switchCommand(), a.launchCommand(adapter.Interactive), a.launchCommand(adapter.Headless), a.statusCommand(), a.handoffCommand(), a.skillCommand())
 	return cmd
 }
 func (a *App) adapter(target string) (adapter.LaunchAdapter, error) {

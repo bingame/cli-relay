@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/adapter"
-	"relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/provider"
 )
 
 func fixtureProvider() provider.Provider {
@@ -35,8 +35,14 @@ func TestRenderLaunchKeepsSecretsOnlyInEnvironment(t *testing.T) {
 	if launch.Env["ANTHROPIC_BASE_URL"] != p.BaseURL || launch.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "fake-small" {
 		t.Fatal("缺少供应商环境")
 	}
-	if !reflect.DeepEqual(launch.Args, []string{"--setting-sources", "", "--settings", artifact.Path}) {
+	pluginPath := filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")
+	if !reflect.DeepEqual(launch.Args, []string{"--setting-sources", "", "--settings", artifact.Path, "--plugin-dir", pluginPath}) {
 		t.Fatalf("argv 不符合隔离契约: %q", launch.Args)
+	}
+	for _, relative := range []string{"SKILL.md", ".claude-plugin/plugin.json"} {
+		if data, err := os.ReadFile(filepath.Join(pluginPath, relative)); err != nil || len(data) == 0 {
+			t.Fatalf("缺少隔离模式下可发现的 Handoff 插件: %s: %v", relative, err)
+		}
 	}
 	if strings.Contains(strings.Join(launch.Args, " "), key) || strings.Contains(string(artifact.Content), key) {
 		t.Fatal("密钥进入 argv 或渲染产物")

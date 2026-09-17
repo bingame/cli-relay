@@ -157,6 +157,8 @@ relay exec <cli> [--provider <id>] [-- <原生参数...>]   # 无头/受监管�
 relay handoff export  [--session <id>] --cli <cli> [--live | --dead] [-o <path>]
 relay handoff continue --doc <path> --cli <cli> [--provider <id>]
 relay handoff schema                                # 打印/校验 Handoff Doc 的 JSON Schema，供 Skill 引用
+relay skill install [--cli claude-code,codex]        # 默认探测本机 CLI；显式指定时可提前离线安装
+relay --version                                    # 发布版本；go install 读取模块构建版本
 ```
 
 退出码约定（供 `exec` 和外层编排器消费，见 §8.3）：`0` 成功；`10` 可重试的基础设施错误；`11` 检测到需要人类介入（如触发了 AskUserQuestion 类工具）；`12` 会话历史损坏需要冷启动重试；其余非零为未分类错误。
@@ -181,13 +183,18 @@ interface LaunchAdapter {
 
   // 会话恢复所需的原生 flag，供 exec 模式和 Handoff 三级 fallback 第 2 层使用
   resumeArgs(sessionId: string): string[];
+
+  // 安装随二进制内嵌的交接 Skill；targetDir 为 relay-handoff 目录
+  installSkill(targetDir: string): void;
 }
 ```
 
+Go 接口对应 `InstallSkill(targetDir string) error`（概念契约 `installSkill(targetDir string) error`）。Claude Code 和 Codex Adapter 分别实现。默认写入 `~/.claude/skills/relay-handoff/SKILL.md` 和 `~/.codex/skills/relay-handoff/SKILL.md`；分别遵循 `CLAUDE_CONFIG_DIR` 与 `CODEX_HOME`。不依赖网络、供应商配置或凭据库。相同内容重复安装不产生重复副本；Relay 管理且未经手改的内容可升级，遇到用户修改或同名手动文件时保留并明确报错。
+
 ### 5.1 ClaudeCodeAdapter（一段式）
-- `render()` 产出一份完整 settings JSON，包含 `env`（`ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL` 等）、`permissions`、`model` 等任意用户 settings 支持的 key。
+- `render()` 产出 settings JSON，包含非敏感 `env`（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` 等）、`permissions`、`model` 等受支持字段；鉴权凭据不写入配置。另生成随二进制内嵌的 Handoff 插件。
 - `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`（保留其余用户已有 key，只覆盖 Relay 管理的字段，用注释/标记块界定 Relay 管理范围，避免覆盖用户手工添加的其他配置）。
-- `buildLaunchInputs()`：`argv = ["--settings", <rendered_file_path>]`，`env = {}`（密钥已经在渲染文件的 `env` 块里，不需要额外注入进程环境）。
+- `buildLaunchInputs()`：使用 `--setting-sources "" --settings <rendered_file_path>` 隔离供应商设置，密钥仅注入子进程环境。实测空 setting-sources 同时关闭用户 Skill，因此通过 `--plugin-dir <Relay生成的handoff-plugin目录>` 显式加载自带 Handoff，插件命令为 `/relay:relay-handoff`；不重新启用全局 settings 或其他用户插件。依据见 Claude Code `NOTES.md`。
 - `resumeArgs(id)`：`["--resume", id]`。
 
 ### 5.2 CodexAdapter（两段式，务必分离 argv 与 env）
@@ -200,7 +207,7 @@ interface LaunchAdapter {
 - `resumeArgs(id)`：视 Codex 当前版本的 resume 子命令语法而定（`exec resume <id>` 或 `--resume <id>`），实现前需在目标 Codex 版本上验证一次，不要假设语法长期不变。
 
 ### 5.3 密钥永不进入 argv
-两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见），只能通过：(a) 文件内容（Claude Code 的 settings 文件，该文件权限应设为 `0600`），或 (b) 直接注入子进程环境变量表（Codex）。
+两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见），不写配置文件，只能经子进程环境变量注入；仅明确调用 `render-env` 时输出。配置产物仍使用私有权限。
 
 ---
 
@@ -297,7 +304,9 @@ front-matter 里的字段是机器读取的元数据；正文各节标题固定�
 **第 1 级 — 活 agent 对话（首选，保真度最高）**
 - 通过一个标准触发词/斜杠命令（如 `/handoff`）或对应 CLI 的 Skill 机制，让当前正在运行、仍持有完整上下文（含未落盘的中间推理）的 agent 自己按 §8.1 schema 输出。
 - 实现为一个 Skill（`SKILL.md` + 触发描述），理由：复用当前 agent 已在内存里的上下文，比事后重新解析日志文件保真度更高；且声明式的 Skill 比写死在 Relay 代码里的 prompt 更容易迭代、不需要重新发版 Relay 本体。
-- Relay 侧只需提供：Skill 内容本身（一份可被 `install-skill-from-github.py` 之类工具安装的 SKILL.md）+ `relay handoff schema` 命令供 Skill 引用最新 schema，防止 Skill 和 Relay 的 schema 版本漂移。
+- Codex 原生支持 `SKILL.md` 格式（[OpenAI 官方 Agent Skills 文档](https://developers.openai.com/codex/skills/)），格式见 [Agent Skills specification](https://agentskills.io/specification)。当前官方文档推荐用户路径 `~/.agents/skills`；本项目按指定路径使用 `$CODEX_HOME/skills`（默认 `~/.codex/skills`），已在 Codex 0.154.0 的 `skills/list` 中实测仍原生加载，见 Codex `NOTES.md`。这不是未解决的开放问题。
+- Skill 内容通过 Go embed 随单一二进制分发。`relay skill install [--cli claude-code,codex]` 默认只为 PATH 或 `RELAY_*_BIN` 可探测到的 CLI 安装；不会执行 CLI 探测，也不会安装目标 CLI 本体。显式 `--cli` 可以在目标 CLI 尚未安装时提前部署。没有探测到目标时给出后续操作提示并成功退出。
+- 两端一行安装器末尾默认运行一次 `relay skill install`；Homebrew/Scoop 使用安装后钩子。手动下载或 `go install` 后保留独立子命令。`relay handoff schema` 提供当前 schema；Skill 升级随 Relay 更新，用户手动修改受保护。
 
 **第 2 级 — agent 已退出，但会话未损坏 → 无头 resume 后触发同一个 Skill**
 - 不直接解析本地会话文件（官方文档明确这类文件格式属于内部实现细节、版本间会变，自建解析器脆弱）。
@@ -342,7 +351,7 @@ multica agent create --name my-agent --runtime-id codex \
 ## 10. 安全要求汇总（贯穿全 spec，此处集中列出供实现自检）
 1. 明文密钥只允许出现在：`provider_secrets` 表的加密列、即将 spawn 的子进程环境变量表。**不允许**出现在：任何 argv、任何日志输出、Handoff Doc、`render-args` 的输出。
 2. `render-env` 的输出本身包含明文（因为下游就是要拿它当 env 用），文档要显式警告调用方"这是敏感输出，不要打印到共享终端/CI 日志"。
-3. Codex 的 `config.toml` 片段只写 `env_key`（变量名），不写明文；Claude Code 的 settings 文件因为格式本身要求 `env` 块内联，文件权限必须设为 `0600`，且不纳入任何自动同步/备份的路径。
+3. Codex 的 `config.toml` 片段只写 `env_key`（变量名），不写明文；Claude Code settings 也不写鉴权凭据，凭据由进程环境注入。配置文件使用 `0600`（Windows 对应用户 ACL）。
 4. `import_log.raw_snapshot` 里如果 cc-switch 的 `mcp_servers` 表包含凭据（部分 MCP server 配置会带 token），也要在存储前做加密，不能因为「本版本不解析它」就当作普通数据明文存放。
 5. 所有对外部文件系统路径的操作（尤其是 Handoff Doc 读取、cc-switch 导入文件读取）要做路径校验，防止路径穿越。
 
@@ -376,3 +385,17 @@ multica agent create --name my-agent --runtime-id codex \
 3. cc-switch `providers` 表的完整列定义（本 spec 依据的是间接来源，导入器实现时应先做一次 `SELECT * FROM providers LIMIT 1` 打印实际列名核对，再固化字段映射，不要硬编码列顺序）。
 4. Claude Code settings 文件的「Relay 管理区块」如何与用户手工编辑的其余内容共存而不冲突，建议用注释标记 + 首次写入前询问用户确认覆盖范围。
 5. 是否需要支持 `cursor-agent` 作为 P0/P1 范围内的第三个 Adapter，还是留到后续版本——取决于用户自己的实际使用频率。
+
+---
+
+## 14. 产品分发与一行安装
+
+- 使用 GoReleaser 与 GitHub Actions。在推送 `v*` tag 时，先通过三系统测试、安装器回归和五平台快照检查，再以 `CGO_ENABLED=0` 发布 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`。用户不需要 Go、Node、Python 或 SQLite 运行时。
+- Unix 产物为 `relay-<os>-<arch>.tar.gz`；Windows 同时提供 `relay-windows-amd64.exe` 和供 Scoop 使用的 zip。Release 附带 `checksums.txt`、两端安装脚本、Homebrew formula、Scoop manifest。
+- Linux/macOS 一行入口为 `curl -fsSL https://get.relay.sh | sh`。探测 uname，下载固定 tag 产物、校验 SHA-256 后安装到 `~/.local/bin`（自动创建）；不可写才回退 `/usr/local/bin`，需要 sudo 时提示。持久化 PATH 并提示如何在当前父 shell 生效。
+- Windows 一行入口为 `irm https://get.relay.sh/install.ps1 | iex`。下载并校验 amd64 exe，安装为 `%LOCALAPPDATA%\Relay\bin\relay.exe`，更新当前进程与用户 PATH。使用系统环境变量 API，避免 `setx PATH` 的截断问题。
+- SHA-256 校验或下载失败不得覆盖现有二进制；通过校验后采用同目录临时文件原子替换。默认运行 Skill 安装；Skill 失败明确返回非零并提示修复命令。
+- 支持 `RELAY_VERSION`、`RELAY_INSTALL_DIR`、`RELAY_REPOSITORY`、`RELAY_SKIP_SKILLS`、`RELAY_NO_MODIFY_PATH`，不引入常驻更新器。当前先使用现有私有仓库 `bingame/cli-relay`，`RELAY_DOWNLOAD_MODE=gh` 复用已授权 GitHub CLI 下载；不要求 token 出现在 argv 或配置中。匿名 curl/irm 入口等待公开发行资源，不依赖未准备的域名即可完成私有安装。
+- Homebrew 使用 tap formula（包括 Linux），Scoop 先添加 bucket 再 `scoop install relay`。生成和推送由 GoReleaser 完成；软件源仓库与授权 token 必须配置一次。`relay-cli/tap` 需要对应组织和仓库已建立，默认使用实际仓库所有者 `bingame`，可通过 CI Variables 改写。
+- Go 开发者可执行 `go install github.com/bingame/cli-relay/cmd/relay@latest`，然后 `relay skill install`。v0.1 不包含 apt/deb 或 winget。
+- 公共域名入口和软件源不是本地构建自动获得的资源；公开发行地址、域名 HTTPS 和软件源配置完成后才可宣布一行安装上线。部署资源与准确步骤见 `distribution/NOTES.md`。

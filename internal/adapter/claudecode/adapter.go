@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"relay/internal/adapter"
-	"relay/internal/provider"
-	"relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
 )
 
 type Adapter struct{ Binary string }
@@ -66,6 +66,9 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 		return adapter.Artifact{}, fmt.Errorf("无法解析渲染路径: %w", err)
 	}
 	if err := safeio.WriteFile(path, data, 0600); err != nil {
+		return adapter.Artifact{}, err
+	}
+	if err := installHandoffPlugin(filepath.Join(filepath.Dir(path), "handoff-plugin")); err != nil {
 		return adapter.Artifact{}, err
 	}
 	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: data, Config: settings, EnvKey: "ANTHROPIC_AUTH_TOKEN"}, nil
@@ -130,7 +133,7 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.R
 	if binary == "" {
 		binary = "claude"
 	}
-	return adapter.LaunchInputs{Binary: binary, Args: []string{"--setting-sources", "", "--settings", artifact.Path}, Env: env, UnsetEnv: append([]string(nil), providerEnv...)}, nil
+	return adapter.LaunchInputs{Binary: binary, Args: []string{"--setting-sources", "", "--settings", artifact.Path, "--plugin-dir", filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")}, Env: env, UnsetEnv: append([]string(nil), providerEnv...)}, nil
 }
 
 func (*Adapter) NativeArgs(mode adapter.Mode, args []string) ([]string, error) {

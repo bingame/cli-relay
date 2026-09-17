@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bingame/cli-relay/internal/safeio"
 	_ "modernc.org/sqlite"
-	"relay/internal/safeio"
 )
 
 type Cipher interface {

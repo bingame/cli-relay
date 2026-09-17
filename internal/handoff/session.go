@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"relay/internal/provider"
-	"relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/safeio"
 )
 
 // FindSessionFile 仅搜索显式 nativeHome 下的原生会话目录，不扫描用户磁盘。

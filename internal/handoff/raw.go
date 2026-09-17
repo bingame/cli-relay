@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/safeio"
 )
 
 // RawExtract 不依赖内部会话文件的完整 schema，仅识别稳定的文本主干。

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/classify"
+	"github.com/bingame/cli-relay/internal/classify"
 )
 
 func TestReviewRPCFrameFlushesBeforeNextRequest(t *testing.T) {

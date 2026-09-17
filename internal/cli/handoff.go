@@ -8,12 +8,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/handoff"
+	"github.com/bingame/cli-relay/internal/process"
+	"github.com/bingame/cli-relay/internal/safeio"
+	"github.com/bingame/cli-relay/internal/secrets"
 	"github.com/spf13/cobra"
-	"relay/internal/adapter"
-	"relay/internal/handoff"
-	"relay/internal/process"
-	"relay/internal/safeio"
-	"relay/internal/secrets"
 )
 
 func (a *App) handoffCommand() *cobra.Command {

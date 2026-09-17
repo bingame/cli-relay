@@ -1,8 +1,8 @@
 package mock
 
 import (
-	"relay/internal/adapter"
-	"relay/internal/provider"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/provider"
 )
 
 // Adapter 用于进程和 CLI 测试，无须安装或调用真实模型 CLI。
@@ -13,7 +13,8 @@ type Adapter struct {
 	Applied bool
 }
 
-func (a *Adapter) Target() string { return a.Name }
+func (a *Adapter) Target() string            { return a.Name }
+func (a *Adapter) InstallSkill(string) error { return nil }
 func (a *Adapter) Render(p provider.Provider, root string) (adapter.Artifact, error) {
 	return adapter.Artifact{Target: a.Name, ProviderID: p.ID}, nil
 }

@@ -1,6 +1,6 @@
 package adapter
 
-import "relay/internal/provider"
+import "github.com/bingame/cli-relay/internal/provider"
 
 type Mode string
 
@@ -32,4 +32,5 @@ type LaunchAdapter interface {
 	BuildLaunchInputs(Artifact, ResolvedSecrets) (LaunchInputs, error)
 	NativeArgs(Mode, []string) ([]string, error)
 	ResumeArgs(string) []string
+	InstallSkill(targetDir string) error
 }

@@ -1,0 +1,74 @@
+name: 验证
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: 使用无符号链接的 macOS 临时目录
+        if: runner.os == 'macOS'
+        run: echo 'TMPDIR=/private/tmp' >> "$GITHUB_ENV"
+      - name: 测试与静态检查
+        shell: bash
+        run: |
+          go test ./...
+          go vet ./...
+      - name: 检查并发访问
+        if: runner.os == 'Linux'
+        run: go test -race ./...
+      - name: 构建与隔离安装验证
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+          PYTHONUTF8: '1'
+        run: |
+          extension=''
+          if [ "$RUNNER_OS" = Windows ]; then extension='.exe'; fi
+          go build -trimpath -o "bin/relay$extension" ./cmd/relay
+          python scripts/test_installers.py --binary "bin/relay$extension"
+          if [ "$RUNNER_OS" = Windows ]; then
+            python scripts/test_installers.py --binary "bin/relay$extension" --powershell pwsh
+          fi
+      - name: 校验 POSIX 安装脚本
+        if: runner.os == 'Linux'
+        run: shellcheck -s sh install.sh
+
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: v2.9.0
+          args: check
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: v2.9.0
+          args: release --snapshot --clean --skip=publish
+      - name: 验证五平台发行产物和包管理清单
+        run: python3 scripts/check_release.py dist

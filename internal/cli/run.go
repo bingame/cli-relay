@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/process"
 	"github.com/spf13/cobra"
-	"relay/internal/adapter"
-	"relay/internal/process"
 )
 
 func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, native []string) (process.Options, error) {

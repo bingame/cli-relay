@@ -1,5 +1,11 @@
 # Claude Code 适配验证与实现边界
 
+## Skill 安装与隔离启动（补充）
+
+2026-09-17 用 Claude Code 2.1.268、临时 `CLAUDE_CONFIG_DIR`、虚构凭据和本地假 Anthropic SSE 服务做三组对照：原生默认启动能发现用户目录的 relay-handoff；加 `--setting-sources ""` 后该 Skill 消失；再加 `--plugin-dir <Relay插件目录>` 后恢复发现，三组均正常完成请求。
+
+因此 `InstallSkill` 按约定写入 `$CLAUDE_CONFIG_DIR/skills/relay-handoff`，而 `Render` 还会在 Relay 自己的 `rendered/claude-code/handoff-plugin` 内安装同一内嵌 Skill 和最小 `.claude-plugin/plugin.json`（`name=relay`、`skills=./`）。`BuildLaunchInputs` 显式附加该目录，隔离启动使用 `/relay:relay-handoff`。插件没有 hooks、MCP、凭据或其他用户 settings，不扩大配置来源；无 provider 时沿用原生 CLI 行为。
+
 验证日期：2026-09-17。只读查看本机 `claude --version`、`claude --help`，版本为 **2.1.268**；参考本地 Multica 的 `server/pkg/agent/claude.go`。请求行为使用临时 `CLAUDE_CONFIG_DIR`、临时工作目录、虚构凭据和 `127.0.0.1` HTTP 服务验证，没有调用真实模型或修改用户配置。
 
 ## 启动与凭据

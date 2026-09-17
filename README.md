@@ -4,7 +4,57 @@ Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供�
 
 已实现规范 P0–P3 与 P5 的接入能力。P4 的通知、重试、关机仅预留接口，不自动执行这些操作。原生 Claude Code / Codex 仍需单独安装。
 
-## 构建与快速开始
+## 安装
+
+发行产物为无运行时依赖的预编译二进制，支持 Linux/macOS amd64、arm64 与 Windows amd64。安装器自动校验 SHA-256、配置 PATH，并为本机 Claude Code/Codex 安装 Handoff Skill。
+
+**当前从私有仓库 `bingame/cli-relay` 分发。** 有仓库访问权限并已 `gh auth login` 的用户可从最新稳定 Release 一行安装，不必准备新域名：
+
+```sh
+gh release download --repo bingame/cli-relay --pattern install.sh --output - | RELAY_DOWNLOAD_MODE=gh sh
+```
+
+```powershell
+$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | Out-String | iex
+```
+
+私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
+
+Linux / macOS（公开发行后可直接使用仓库地址）：
+
+```sh
+curl -fsSL https://github.com/bingame/cli-relay/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://github.com/bingame/cli-relay/releases/latest/download/install.ps1 | iex
+```
+
+`get.relay.sh` 完成域名部署后，入口可缩短为 `curl -fsSL https://get.relay.sh | sh` 和 `irm https://get.relay.sh/install.ps1 | iex`。Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。
+
+已有 Homebrew/Scoop 的用户，在软件源完成配置后可使用：
+
+```sh
+brew install bingame/tap/relay
+```
+
+```powershell
+scoop bucket add relay https://github.com/bingame/scoop-bucket
+scoop install relay
+```
+
+也可从 Releases 手动下载对应归档，按 `checksums.txt` 校验后解压。使用 Go 1.26+ 的开发者可运行：
+
+```sh
+go install github.com/bingame/cli-relay/cmd/relay@latest
+relay skill install
+```
+
+`go install` 或手动解压不会执行安装后钩子。重复运行一行命令可升级；设置 `RELAY_VERSION=v0.1.0` 可固定版本，`RELAY_INSTALL_DIR` 可指定绝对安装目录。更多安装选项见发布说明。
+
+## 源码构建与快速开始
 
 需要 Go 1.26 或更新版本。SQLite 使用 `modernc.org/sqlite`，无需 CGO。
 
@@ -12,6 +62,7 @@ Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供�
 $env:CGO_ENABLED = '0'
 go build -trimpath -o bin/relay.exe ./cmd/relay
 .\bin\relay.exe --help
+.\bin\relay.exe skill install
 
 # 先查看导入报告，不写入 Relay 数据目录
 .\bin\relay.exe provider import --from cc-switch .\providers.sql --dry-run
@@ -50,6 +101,8 @@ unset RELAY_INPUT_KEY
 | `run <cli> [--provider <id>] -- ...` | 原生交互；Unix 使用 `syscall.Exec`，Windows 继承控制台后等待子进程 |
 | `exec <cli> [--provider <id>] -- ...` | 单次无头运行、实时转发输出、记录会话、返回分类退出码 |
 | `status` | 输出 current 和仍存活的管理实例；不是完整系统进程枚举 |
+| `skill install [--cli claude-code,codex]` | 从二进制离线安装 Handoff Skill，默认只安装本机可探测到的 CLI |
+| `--version` | 显示发布版本 |
 | `handoff schema [--validate <doc>]` | 输出 JSON Schema，或校验 Markdown 文档 |
 | `handoff export --cli <cli> --live` | 输出应交给活 agent 的请求；不会假装读取活 agent 的内存 |
 | `handoff export --cli <cli> --input <doc或-> [-o <path>]` | 校验并接收活 agent 实际生成的文档 |
@@ -80,7 +133,16 @@ Codex 默认使用 `-c` 内联非敏感供应商定义，未执行 switch 也可
 
 ## Handoff
 
-将仓库的 `skills/relay-handoff/` 安装到目标 CLI 的 skills 目录，在活会话中触发 `/relay-handoff`（或请求按该 Skill 交接）。文档固定包含 YAML 元数据和 8 个中文章节，不能是空模板；可用 `relay handoff schema --validate handoff.md` 检查。
+一行安装器、Homebrew 和 Scoop 会自动安装随二进制内嵌的 Skill。后续安装了新的 CLI，或需要单独更新时运行：
+
+```sh
+relay skill install
+relay skill install --cli claude-code,codex
+```
+
+默认安装到 `~/.claude/skills/relay-handoff/SKILL.md` 和 `~/.codex/skills/relay-handoff/SKILL.md`，支持 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。显式 `--cli` 不要求目标 CLI 已安装；自动探测只检查入口，不启动模型。没有目标 CLI 时给出提示。已有同名手动文件或被编辑过的内容会保留并报错，备份移走该文件后可重试；未手改的 Relay Skill 自动升级。
+
+原生 Claude 活会话使用 `/relay-handoff`；通过 Relay 指定供应商启动 Claude 时，隔离设置也会关闭用户 Skill 发现，因此 Relay 显式加载自己的插件，使用 `/relay:relay-handoff`。Codex 使用 `$relay-handoff`，也可直接请求使用该 Skill 交接。已运行的会话若尚未发现新 Skill，请重新启动会话。文档固定包含 YAML 元数据和 8 个中文章节，不能是空模板；可用 `relay handoff schema --validate handoff.md` 检查。
 
 ```sh
 relay handoff export --cli codex --input handoff-from-agent.md -o handoff.md
@@ -153,6 +215,9 @@ python -X utf8 scripts/verify_real_import.py bin/relay.exe path/to/cc-switch-exp
 
 # 原生 Codex + Relay CLI + Multica 风格 wrapper，全程仅访问本地假服务
 python -X utf8 scripts/verify_codex_relay.py
+
+# 真实 Claude + 本地假服务：确认交接 Skill 与供应商隔离兼容
+python -X utf8 scripts/verify_claude_skill.py --relay bin/relay.exe --claude path/to/claude.exe
 ```
 
 另外在 WSL Ubuntu 20.04 实际执行了 Linux 进程与 CLI 测试，验证 Unix `run` 替换进程后 PID 保持不变且保留原生退出码；macOS 目前仅完成交叉构建，未做原机运行验证。

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"relay/internal/adapter"
-	"relay/internal/adapter/claudecode"
-	"relay/internal/adapter/codex"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter/claudecode"
+	"github.com/bingame/cli-relay/internal/adapter/codex"
 )
 
 // 只有显式提供路径才接触真实 dump；所有产物写入测试隔离目录，不调用真实 CLI。

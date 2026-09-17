@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/adapter"
-	"relay/internal/adapter/mock"
-	"relay/internal/handoff"
-	"relay/internal/process"
+	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/bingame/cli-relay/internal/adapter/mock"
+	"github.com/bingame/cli-relay/internal/handoff"
+	"github.com/bingame/cli-relay/internal/process"
 )
 
 func sampleDoc() []byte {

@@ -1,8 +1,8 @@
 package cli
 
 import (
+	"github.com/bingame/cli-relay/internal/process"
 	"github.com/spf13/cobra"
-	"relay/internal/process"
 )
 
 func (a *App) statusCommand() *cobra.Command {
