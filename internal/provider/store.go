@@ -171,8 +171,12 @@ func (s *Store) List(ctx context.Context, target string) ([]Provider, error) {
 	for rows.Next() {
 		var p Provider
 		var targets, extra string
-		if e = rows.Scan(&p.ID, &p.DisplayName, &targets, &p.BaseURL, &p.Model, &extra, &p.Source, &p.CreatedAt, &p.UpdatedAt, &p.SecretMode, &p.Status, &p.ContentHash); e != nil {
+		var contentHash sql.NullString
+		if e = rows.Scan(&p.ID, &p.DisplayName, &targets, &p.BaseURL, &p.Model, &extra, &p.Source, &p.CreatedAt, &p.UpdatedAt, &p.SecretMode, &p.Status, &contentHash); e != nil {
 			return nil, e
+		}
+		if contentHash.Valid {
+			p.ContentHash = contentHash.String
 		}
 		if json.Unmarshal([]byte(targets), &p.Targets) != nil || json.Unmarshal([]byte(extra), &p.Extra) != nil {
 			return nil, fmt.Errorf("供应商数据损坏")
