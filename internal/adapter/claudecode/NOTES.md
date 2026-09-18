@@ -11,10 +11,10 @@
 ## 启动与凭据
 
 - 原生支持 `--settings <file-or-json>`、`--resume <id>`。无头模式使用 `-p --verbose --output-format stream-json`；保留调用方 prompt 与其余参数，相同协议参数归一化，冲突输出格式报错。
-- 规范 §5.1 的明文 settings 与 §2、§10 及项目安全约定矛盾。实现以安全要求为准：JSON 渲染文件和全局 settings **不写供应商密钥**；`api_key` 通过子进程 `ANTHROPIC_AUTH_TOKEN` 注入，`env:NAME` 加密凭据注入对应环境变量。`render-env` 是唯一允许明确输出这些值的 CLI 接口。
-- `switch` 只同步配置与当前供应商指针；原生 `claude` 进程不会自动读取 Relay 的加密密钥。使用 `relay run`、`relay exec` 或显式消费 `render-env` 来获得凭据。
+- 2026-09-18 按 Relay v0.5 改为回调鉴权：JSON 渲染文件和全局 settings **不写供应商密钥**，只设置 `apiKeyHelper = "relay secret get claude-code <id>"`。helper 只向 stdout 输出密钥本体。
+- `switch` 合并非敏感配置；原生 `claude` 可通过 `apiKeyHelper` 自行读取 Relay 加密密钥。`run`/`exec` 不再向子进程环境注入主凭据，`render-env` 在默认 callback 模式下为空。
 - 已验证：即使进程环境已含 `ANTHROPIC_AUTH_TOKEN=fake-injected-token`，user settings 中的 `env.ANTHROPIC_AUTH_TOKEN=fake-global-token` 仍覆盖它，请求使用后者。仅清除父进程旧变量不足以隔离供应商。
-- 因此受控启动固定使用 `--setting-sources "" --settings <产物>`。本地对照请求确认此时使用注入的虚构凭据，并忽略 user/project/local settings 的冲突凭据。调用方不得通过原生 `--settings`、`--setting-sources` 覆盖此隔离；需要保留的无密钥设置放进 `extra.claude_settings`，由导入器保留或手工配置。
+- 受控启动使用 `--settings <产物>`，保留 Claude Code 的正常 settings/Skill 发现链；启动环境显式清除继承的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，避免其认证优先级盖过 helper。调用方不得通过原生 `--settings`、`--setting-sources` 覆盖 Relay 配置。
 - **同一对照验证确认：空 `--setting-sources` 同时关闭项目 `CLAUDE.md` 自动加载。** Relay 不声称保留该原生自动发现行为。需要项目指令时，显式提供 `--append-system-prompt-file <CLAUDE.md 路径>` 或在 prompt 中提供上下文；此处没有自行仿写 Claude 的项目指令搜索规则。管理员 managed settings 属于 Claude 自身策略，Relay 不绕过它。
 - 在合并环境前删除旧身份、base URL、模型别名与 Bedrock/Vertex/Foundry 选择变量，再设置当前供应商环境。禁止同时注入 AUTH_TOKEN 和 API_KEY，避免认证方式歧义。
 

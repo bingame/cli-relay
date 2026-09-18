@@ -17,6 +17,8 @@ type Artifact struct {
 	Content    []byte
 	EnvKey     string
 	Config     map[string]any
+	Profile    map[string]any
+	SourceHash string
 }
 type ResolvedSecrets map[string]string
 type LaunchInputs struct {
@@ -27,7 +29,7 @@ type LaunchInputs struct {
 }
 type LaunchAdapter interface {
 	Target() string
-	Render(provider.Provider, string) (Artifact, error)
+	Render(provider.Provider, string, ...provider.Model) (Artifact, error)
 	ApplyGlobal(Artifact, string) error
 	BuildLaunchInputs(Artifact, ResolvedSecrets) (LaunchInputs, error)
 	NativeArgs(Mode, []string) ([]string, error)

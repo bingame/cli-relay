@@ -10,7 +10,7 @@
 
 ## 实测结果
 
-- `--profile` 和 `-c model_provider=...` 都可以启动，但 **0.134.0 起 profile 改为 `$CODEX_HOME/<name>.config.toml` 独立文件**；不再读取 `[profiles.name]`。本项目默认用 `-c` 传入不含密钥的供应商定义和 model 指针，不改全局文件。可选 profile 模式仅在配置已通过 switch 安装后使用。
+- `--profile` 和 `-c model_provider=...` 都可以启动，但 **0.134.0 起 profile 改为 `$CODEX_HOME/<name>.config.toml` 独立文件**；不再读取 `[profiles.name]`。2026-09-18 官方文档进一步确认，Codex 先加载主 `config.toml`，再 overlay 独立 profile。因此 Relay v0.5 在主配置注册 provider，profile 只写选择器，启动统一使用 `--profile`。
 - 无头恢复语法为 `codex exec resume <SESSION_ID> <PROMPT>`；交互恢复是 `codex resume <SESSION_ID>`。
 - `shell_environment_policy` 过滤的是模型调用 shell 时的环境，**不是 Codex 自身读取 `env_key` 的环境**。把凭据加入 shell allowlist 并非鉴权前提，还会让模型执行的 shell 获取凭据。
 - 旧语法 `include_only = ["PATH", "HOME"]` 仍可解析；当前推荐 `filters = { "RELAY_*" = "exclude" }`，不可在同一层混用 filters 和旧 exclude/include_only。
@@ -18,20 +18,20 @@
 
 ## 规范修正
 
-遵循 §2/§10 的安全要求，凭据只经子进程环境注入，默认不主动扩大 shell allowlist。不把旧 `[profiles.x]` 写入新版本 Codex。临时启动内联供应商定义以保证未 switch 的 provider 也可用。静态片段不包含 API key。
+遵循 §2/§10 的安全要求，默认通过 `[model_providers.<id>.auth]` 回调 `relay secret get codex <id>`，不把明文凭据写入环境、argv 或配置，也不主动扩大 shell allowlist。`run`/`exec` 在启动前幂等安装主配置注册表和独立 profile，但不修改顶层默认；`switch` 才更新顶层 `model_provider`/`model`。
 
 ## 依据
 
 - https://developers.openai.com/codex/config-advanced/ （profile 文件迁移、配置覆盖）
-- https://developers.openai.com/codex/config-reference/ （env_key、shell_environment_policy）
+- https://developers.openai.com/codex/config-reference/ （auth.command、env_key、刷新语义与互斥约束）
 - 本机 `codex --help`、`codex exec resume --help` 与上述隔离探针。
 
 ## 实现边界与验证
 
-- 默认 `LaunchMode=override`：`-c` 同时注入完整 `model_providers.relay_*` 定义及 model 指针，不依赖先前 `switch`。环境变量名包含供应商 ID 的摘要，避免 `a-b`、`a_b` 和大小写差异导致冲突。
+- Relay provider ID、Codex provider ID 和独立 profile 文件名统一。profile 不重复供应商注册表；`BuildLaunchInputs` 使用 `--profile <id>`，并在启动前确保注册表/profile 已安装。
 - `Extra.codex_config` 接受已解析的原生 TOML 对象，按原 `model_provider` 选择供应商定义；仅映射模型与供应商相关字段，不从导入配置传播执行审批、安全沙箱或 shell 环境策略。`Provider.BaseURL`、`Provider.Model` 优先。
 - Provider 经 SQLite JSON 列往返后数字会变为 Go `float64`，直接编码会生成原生整数配置不接受的 `3.0`。适配器对重试、超时、上下文窗口和自动压缩阈值这些已知整数字段恢复整数类型，并拒绝负数、小数或失去精度的浮点值；单元测试和本机假 SSE 测试均覆盖 JSON 往返路径。
-- 明文字段（如 `api_key`、`experimental_bearer_token`、`http_headers`）拒绝渲染；额外鉴权用 `env_http_headers` 环境变量名映射和加密存储中的 `env:NAME`。所有凭据仅加入启动环境，配置产物和 argv 不含凭据。
+- 明文字段（如 `api_key`、`experimental_bearer_token`、`http_headers`）拒绝渲染；默认主凭据走 `auth.command`，`env_key` 仅为显式降级模式。额外 header 仍用 `env_http_headers` 环境变量名映射和加密存储中的 `env:NAME`。配置产物和 argv 不含凭据。
 - `ApplyGlobal` 使用 TOML 语法树修改已有顶层模型指针，保留同行注释、无关设置和多行字符串；供应商区块由 `BEGIN/END RELAY CODEX` 注释管理。拒绝覆盖同名的手动供应商或独立 profile。文件按安全写入接口替换，并使用配置锁避免多个 Relay 进程同时修改。
 - 额外实测发现：Codex 0.154.0 对旧顶层 `profile = "..."` **直接拒绝启动**，错误要求改用 `--profile` 和独立 profile 文件。因此 `ApplyGlobal` 定点移除旧顶层 `profile` 赋值，保留同行注释、原独立 profile 文件以及历史 `[profiles.*]` 表。后者在当前版本不被使用，但实测保留它们不妨碍全局默认启动。
 - 可选 `LaunchMode=profile` 只读取已经安装、内容与产物相符的 `<relay_id>.config.toml`；未安装或用户修改后报错，不隐式执行全局切换。配置路径遵循显式 `NativeHome`、`CODEX_HOME`、`~/.codex` 的优先级。

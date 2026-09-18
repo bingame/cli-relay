@@ -9,12 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/bingame/cli-relay/internal/adapter"
 	"github.com/bingame/cli-relay/internal/provider"
-	"github.com/bingame/cli-relay/internal/safeio"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -34,7 +32,7 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func names(id string) (string, string) {
 	digest := sha256.Sum256([]byte(id))
 	slug := strings.ReplaceAll(id, "-", "_")
-	return fmt.Sprintf("relay_%s_%x", slug, digest[:6]), fmt.Sprintf("RELAY_%s_%X_KEY", strings.ToUpper(slug), digest[:6])
+	return id, fmt.Sprintf("RELAY_%s_%X_KEY", strings.ToUpper(slug), digest[:6])
 }
 
 var providerFields = map[string]bool{
@@ -89,14 +87,15 @@ func normalizeIntegers(config map[string]any) error {
 	return nil
 }
 
-func containsCredentials(value any) bool {
+func containsCredentials(value any, allowAuth ...bool) bool {
+	authAllowed := len(allowAuth) > 0 && allowAuth[0]
 	switch v := value.(type) {
 	case map[string]any:
 		for key, child := range v {
 			k := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 			normalized := strings.ReplaceAll(k, "_", "")
 			if k != "env_key" && k != "env_key_instructions" && k != "env_http_headers" {
-				if k == "auth" || k == "http_headers" || normalized == "token" || strings.Contains(normalized, "authorization") || strings.Contains(normalized, "apikey") || strings.Contains(normalized, "password") || strings.Contains(normalized, "passphrase") || strings.Contains(normalized, "bearer") || strings.HasSuffix(normalized, "token") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "credential") || strings.Contains(normalized, "privatekey") || strings.Contains(normalized, "cookie") {
+				if k == "auth" && !authAllowed || k == "http_headers" || normalized == "token" || strings.Contains(normalized, "authorization") || strings.Contains(normalized, "apikey") || strings.Contains(normalized, "password") || strings.Contains(normalized, "passphrase") || strings.Contains(normalized, "bearer") || strings.HasSuffix(normalized, "token") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "credential") || strings.Contains(normalized, "privatekey") || strings.Contains(normalized, "cookie") {
 					return true
 				}
 			}
@@ -104,7 +103,7 @@ func containsCredentials(value any) bool {
 				// 映射中的值是环境变量名，不是 HTTP header 的字面值。
 				continue
 			}
-			if containsCredentials(child) {
+			if containsCredentials(child, authAllowed) {
 				return true
 			}
 		}
@@ -113,10 +112,10 @@ func containsCredentials(value any) bool {
 		for k, s := range v {
 			m[k] = s
 		}
-		return containsCredentials(m)
+		return containsCredentials(m, authAllowed)
 	case []any:
 		for _, child := range v {
-			if containsCredentials(child) {
+			if containsCredentials(child, authAllowed) {
 				return true
 			}
 		}
@@ -124,7 +123,7 @@ func containsCredentials(value any) bool {
 	return false
 }
 
-func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifact, error) {
+func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provider.Model) (adapter.Artifact, error) {
 	if err := p.Validate(); err != nil {
 		return adapter.Artifact{}, err
 	}
@@ -132,7 +131,7 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 		return adapter.Artifact{}, fmt.Errorf("供应商不支持 Codex")
 	}
 	nativeID, envKey := names(p.ID)
-	definition := map[string]any{"name": p.DisplayName, "env_key": envKey, "wire_api": "responses"}
+	definition := map[string]any{"name": p.DisplayName, "wire_api": "responses"}
 	profile := map[string]any{"model_provider": nativeID}
 	if raw, ok := p.Extra["codex_config"]; ok {
 		config, ok := raw.(map[string]any)
@@ -164,6 +163,17 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 	if p.Model != "" {
 		profile["model"] = p.Model
 	}
+	switch p.EffectiveSecretMode() {
+	case "callback":
+		definition["auth"] = map[string]any{
+			"command": "relay", "args": []string{"secret", "get", "codex", p.ID},
+			"timeout_ms": int64(5000), "refresh_interval_ms": int64(0),
+		}
+	case "env_key":
+		definition["env_key"] = envKey
+	default:
+		return adapter.Artifact{}, fmt.Errorf("Codex 仅支持 callback 或 env_key 密钥模式")
+	}
 	if err := normalizeIntegers(definition); err != nil {
 		return adapter.Artifact{}, err
 	}
@@ -193,54 +203,69 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 			}
 		}
 	}
-	config := make(map[string]any, len(profile)+1)
-	for k, v := range profile {
-		config[k] = v
-	}
-	config["model_providers"] = map[string]any{nativeID: definition}
+	config := map[string]any{"model_providers": map[string]any{nativeID: definition}}
+	sourceHash := provider.ContentHash(p, models)
 	content, err := toml.Marshal(config)
 	if err != nil {
 		return adapter.Artifact{}, fmt.Errorf("无法生成 Codex 原生配置")
 	}
+	content = append([]byte("# relay-source-hash: "+sourceHash+"\n"), content...)
 	path := filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".toml.fragment")
-	if err := safeio.WriteFile(path, content, 0600); err != nil {
+	if err := adapter.WriteRendered(path, content, sourceHash); err != nil {
 		return adapter.Artifact{}, err
 	}
-	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: content, EnvKey: envKey, Config: config}, nil
+	if len(models) > 0 {
+		catalogPath := filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".catalog.json")
+		catalog := map[string]any{"models": models}
+		data, err := json.MarshalIndent(catalog, "", "  ")
+		if err != nil {
+			return adapter.Artifact{}, fmt.Errorf("无法生成 Codex 模型目录")
+		}
+		if err := adapter.WriteRendered(catalogPath, append(data, '\n'), sourceHash); err != nil {
+			return adapter.Artifact{}, err
+		}
+		profile["model_catalog_json"] = catalogPath
+	}
+	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: content, EnvKey: envKey, Config: config, Profile: profile, SourceHash: sourceHash}, nil
 }
 
 // artifactConfig 每次从不可含密钥的 TOML 重新校验，避免调用方修改 Config 后绕过边界。
-func artifactConfig(artifact adapter.Artifact) (map[string]any, string, error) {
+func artifactConfig(artifact adapter.Artifact) (map[string]any, map[string]any, string, error) {
 	if artifact.Target != "codex" || !provider.ValidID(artifact.ProviderID) {
-		return nil, "", fmt.Errorf("无效的 Codex 配置产物")
+		return nil, nil, "", fmt.Errorf("无效的 Codex 配置产物")
 	}
 	id, envKey := names(artifact.ProviderID)
 	if artifact.EnvKey != envKey {
-		return nil, "", fmt.Errorf("Codex 配置产物的环境变量名不匹配")
+		return nil, nil, "", fmt.Errorf("Codex 配置产物的环境变量名不匹配")
 	}
 	var config map[string]any
 	if err := toml.Unmarshal(artifact.Content, &config); err != nil {
-		return nil, "", fmt.Errorf("Codex 配置产物不是有效 TOML")
+		return nil, nil, "", fmt.Errorf("Codex 配置产物不是有效 TOML")
 	}
-	if containsCredentials(config) {
-		return nil, "", fmt.Errorf("Codex 配置产物包含凭据字段")
+	if containsCredentials(config, true) {
+		return nil, nil, "", fmt.Errorf("Codex 配置产物包含凭据字段")
 	}
-	if config["model_provider"] != id {
-		return nil, "", fmt.Errorf("Codex 配置产物的供应商指针不匹配")
+	profile := artifact.Profile
+	if profile == nil || profile["model_provider"] != id {
+		return nil, nil, "", fmt.Errorf("Codex 配置产物的供应商指针不匹配")
 	}
 	defs, ok := config["model_providers"].(map[string]any)
 	if !ok || len(defs) != 1 {
-		return nil, "", fmt.Errorf("Codex 配置产物缺少独立供应商定义")
+		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少独立供应商定义")
 	}
 	def, ok := defs[id].(map[string]any)
-	if !ok || def["env_key"] != envKey {
-		return nil, "", fmt.Errorf("Codex 配置产物的鉴权环境变量不匹配")
+	if !ok {
+		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少供应商定义")
 	}
-	return config, id, nil
+	_, callback := def["auth"].(map[string]any)
+	if !callback && def["env_key"] != envKey {
+		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少有效鉴权配置")
+	}
+	return config, profile, id, nil
 }
 
 func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
-	config, id, err := artifactConfig(artifact)
+	config, _, id, err := artifactConfig(artifact)
 	if err != nil {
 		return adapter.LaunchInputs{}, err
 	}
@@ -249,8 +274,11 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.R
 		binary = "codex"
 	}
 	inputs := adapter.LaunchInputs{Binary: binary, Env: map[string]string{}, UnsetEnv: []string{artifact.EnvKey}}
-	if key := secrets["api_key"]; key != "" {
-		inputs.Env[artifact.EnvKey] = key
+	def := config["model_providers"].(map[string]any)[id].(map[string]any)
+	if def["env_key"] == artifact.EnvKey {
+		if key := secrets["api_key"]; key != "" {
+			inputs.Env[artifact.EnvKey] = key
+		}
 	}
 	for k, v := range secrets {
 		if !strings.HasPrefix(k, "env:") {
@@ -268,41 +296,14 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.R
 	if strings.ContainsRune(inputs.Env[artifact.EnvKey], 0) {
 		return adapter.LaunchInputs{}, fmt.Errorf("密钥包含环境变量不支持的字符")
 	}
-	switch a.LaunchMode {
-	case "", "override":
-		defs := config["model_providers"].(map[string]any)
-		inline, err := inlineTOML(defs[id])
-		if err != nil {
-			return adapter.LaunchInputs{}, err
-		}
-		inputs.Args = []string{"-c", "model_providers." + id + "=" + inline}
-		keys := make([]string, 0, len(config))
-		for key := range config {
-			if key != "model_providers" {
-				keys = append(keys, key)
-			}
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			value, err := inlineTOML(config[key])
-			if err != nil {
-				return adapter.LaunchInputs{}, err
-			}
-			inputs.Args = append(inputs.Args, "-c", key+"="+value)
-		}
-	case "profile":
-		home, err := a.nativeHome()
-		if err != nil {
-			return adapter.LaunchInputs{}, err
-		}
-		actual, err := safeio.ReadRegular(filepath.Join(home, id+".config.toml"), 16<<20)
-		if err != nil || !bytes.Equal(actual, profileContent(id, artifact.Content)) {
-			return adapter.LaunchInputs{}, fmt.Errorf("Codex profile 尚未安装或已变更，请先执行 relay switch")
-		}
-		inputs.Args = []string{"--profile", id}
-	default:
-		return adapter.LaunchInputs{}, fmt.Errorf("不支持的 Codex 启动模式（仅支持 override 和 profile）")
+	home, err := a.nativeHome()
+	if err != nil {
+		return adapter.LaunchInputs{}, err
 	}
+	if err := a.install(artifact, home, false); err != nil {
+		return adapter.LaunchInputs{}, err
+	}
+	inputs.Args = []string{"--profile", id}
 	return inputs, nil
 }
 

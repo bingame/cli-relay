@@ -67,7 +67,7 @@ func NewRootWithApp(a *App) *cobra.Command {
 	if x, ok := a.Adapters["codex"].(*codex.Adapter); ok {
 		cmd.PersistentFlags().StringVar(&x.LaunchMode, "codex-launch-mode", x.LaunchMode, "Codex 配置方式：override 或 profile（profile 需先 switch）")
 	}
-	cmd.AddCommand(a.providerCommand(), a.switchCommand(), a.launchCommand(adapter.Interactive), a.launchCommand(adapter.Headless), a.statusCommand(), a.handoffCommand(), a.skillCommand())
+	cmd.AddCommand(a.providerCommand(), a.secretCommand(), a.switchCommand(), a.launchCommand(adapter.Interactive), a.launchCommand(adapter.Headless), a.statusCommand(), a.handoffCommand(), a.skillCommand())
 	return cmd
 }
 func (a *App) adapter(target string) (adapter.LaunchAdapter, error) {

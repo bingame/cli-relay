@@ -46,7 +46,14 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 		if !p.Supports(target) {
 			return process.Options{}, fmt.Errorf("供应商不支持目标 CLI")
 		}
-		artifact, e := ad.Render(p, a.Home)
+		if p.EffectiveStatus() == "disabled" {
+			return process.Options{}, fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
+		}
+		models, e := s.Models(cmd.Context(), p.ID)
+		if e != nil {
+			return process.Options{}, e
+		}
+		artifact, e := ad.Render(p, a.Home, models...)
 		if e != nil {
 			return process.Options{}, e
 		}

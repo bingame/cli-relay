@@ -15,12 +15,20 @@ import (
 	"github.com/pelletier/go-toml/v2/unstable"
 )
 
-func profileContent(id string, content []byte) []byte {
-	return append([]byte("# Relay 管理的 Codex profile："+id+"\n"), content...)
+func profileContent(id string, profile map[string]any) ([]byte, error) {
+	content, err := toml.Marshal(profile)
+	if err != nil {
+		return nil, fmt.Errorf("无法生成 Codex profile")
+	}
+	return append([]byte("# Relay 管理的 Codex profile："+id+"\n"), content...), nil
 }
 
 func (a *Adapter) ApplyGlobal(artifact adapter.Artifact, nativeHome string) error {
-	config, id, err := artifactConfig(artifact)
+	return a.install(artifact, nativeHome, true)
+}
+
+func (a *Adapter) install(artifact adapter.Artifact, nativeHome string, setDefault bool) error {
+	config, profile, id, err := artifactConfig(artifact)
 	if err != nil {
 		return err
 	}
@@ -72,17 +80,18 @@ func (a *Adapter) ApplyGlobal(artifact adapter.Artifact, nativeHome string) erro
 	if profileErr == nil && !bytes.HasPrefix(oldProfile, []byte("# Relay 管理的 Codex profile："+id+"\n")) {
 		return fmt.Errorf("Codex 已有同名手动 profile，拒绝覆盖")
 	}
-	pointers := map[string]any{}
-	for key, value := range config {
-		if key != "model_providers" {
+	if setDefault {
+		pointers := map[string]any{}
+		for key, value := range profile {
 			pointers[key] = value
 		}
-	}
-	// 新版 Codex 对旧顶层 profile 指针直接报错；switch 仅移除指针，保留旧 profile 内容。
-	pointers["profile"] = nil
-	base, err = setTopLevelValues(base, pointers)
-	if err != nil {
-		return err
+		delete(pointers, "model_catalog_json")
+		// 新版 Codex 对旧顶层 profile 指针直接报错；switch 仅移除指针，保留旧 profile 内容。
+		pointers["profile"] = nil
+		base, err = setTopLevelValues(base, pointers)
+		if err != nil {
+			return err
+		}
 	}
 	definition, err := toml.Marshal(map[string]any{"model_providers": config["model_providers"]})
 	if err != nil {
@@ -104,7 +113,11 @@ func (a *Adapter) ApplyGlobal(artifact adapter.Artifact, nativeHome string) erro
 	if err := toml.Unmarshal(merged, &checked); err != nil {
 		return fmt.Errorf("合并后的 Codex 配置无效，未修改文件")
 	}
-	if err := safeio.WriteFile(profilePath, profileContent(id, artifact.Content), 0600); err != nil {
+	profileData, err := profileContent(id, profile)
+	if err != nil {
+		return err
+	}
+	if err := safeio.WriteFile(profilePath, profileData, 0600); err != nil {
 		return err
 	}
 	if err := safeio.WriteFile(path, merged, 0600); err != nil {

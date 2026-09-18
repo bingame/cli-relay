@@ -22,6 +22,13 @@ func (a *App) switchCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
+		if p.EffectiveStatus() == "disabled" {
+			return fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
+		}
+		models, e := s.Models(cmd.Context(), p.ID)
+		if e != nil {
+			return e
+		}
 		targets := p.Targets
 		if target != "" {
 			if !p.Supports(target) {
@@ -40,7 +47,7 @@ func (a *App) switchCommand() *cobra.Command {
 		}
 		for _, t := range targets {
 			ad, _ := a.adapter(t)
-			artifact, e := ad.Render(p, a.Home)
+			artifact, e := ad.Render(p, a.Home, models...)
 			if e != nil {
 				return e
 			}

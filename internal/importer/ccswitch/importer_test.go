@@ -33,7 +33,7 @@ func TestParseRealisticDump(t *testing.T) {
 		t.Fatal("file hash does not match original bytes")
 	}
 	claude := result.Providers[0]
-	if claude.Provider.ID != "demo" || claude.Provider.DisplayName != "Claude '演示'; ATTACH" || !claude.Current || !claude.Provider.Supports("claude-code") {
+	if claude.Provider.ID != "claude-attach" || claude.Provider.DisplayName != "Claude '演示'; ATTACH" || !claude.Current || !claude.Provider.Supports("claude-code") {
 		t.Fatal("Claude column or target mapping failed")
 	}
 	if claude.Provider.BaseURL != "https://claude.example.test" || claude.Provider.Model != "claude-example" {
@@ -47,7 +47,7 @@ func TestParseRealisticDump(t *testing.T) {
 		t.Fatal("nonsecret settings were lost")
 	}
 	codex := result.Providers[1]
-	if codex.Provider.ID != "demo" || codex.Provider.BaseURL != "https://codex.example.test/v1" || codex.Provider.Model != "gpt-example" || !codex.Provider.Supports("codex") || codex.Current {
+	if codex.Provider.ID != "codex" || codex.Provider.BaseURL != "https://codex.example.test/v1" || codex.Provider.Model != "gpt-example" || !codex.Provider.Supports("codex") || codex.Current {
 		t.Fatal("Codex selected provider mapping failed")
 	}
 	if codex.Secrets["api_key"] != "fake-codex-key" || codex.Secrets["env:MY_API_KEY"] != "fake-env-key" {

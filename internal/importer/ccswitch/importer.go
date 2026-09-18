@@ -28,6 +28,7 @@ const exportHeader = "-- CC Switch SQLite 导出"
 
 type Entry struct {
 	Provider   provider.Provider
+	Models     []provider.Model
 	Secrets    map[string]string
 	Current    bool
 	OriginalID string
@@ -208,7 +209,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 		return Entry{}, err
 	}
 	entry := Entry{
-		Provider: provider.Provider{ID: safeSlug(id), DisplayName: name, Targets: []string{app}, Source: "cc-switch-import", Extra: map[string]any{}},
+		Provider: provider.Provider{ID: provider.Slugify(name), DisplayName: name, Targets: []string{app}, Source: "cc-switch-import", SecretMode: "callback", Status: "active", Extra: map[string]any{}},
 		Secrets:  map[string]string{"source_settings": raw}, Current: current, OriginalID: id,
 	}
 	if rawMeta, ok := textValue(row["meta"]); ok {
@@ -222,6 +223,18 @@ func parseEntry(row map[string]any) (Entry, error) {
 		entry.Provider.Model = firstString(env["ANTHROPIC_MODEL"], settings["model"])
 		entry.Secrets["api_key"] = firstString(env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_API_KEY"], settings["api_key"])
 		entry.Provider.Extra["claude_settings"] = sanitize(settings, "", entry.Secrets)
+		if picker, ok := settings["modelPicker"].(map[string]any); ok {
+			if options, ok := picker["options"].([]any); ok {
+				for i, raw := range options {
+					if option, ok := raw.(map[string]any); ok {
+						modelID := firstString(option["value"], option["model"], option["id"])
+						if modelID != "" {
+							entry.Models = append(entry.Models, provider.Model{ProviderID: entry.Provider.ID, ModelID: modelID, DisplayName: firstString(option["label"], option["displayName"], option["name"]), IsDefault: modelID == entry.Provider.Model, SortOrder: i})
+						}
+					}
+				}
+			}
+		}
 		// 两种鉴权不能同时注入；保留原生 API_KEY 语义，次要凭据仅留在加密源配置中。
 		if entry.Secrets["api_key"] != "" {
 			entry.Secrets["api_key_env"] = "ANTHROPIC_AUTH_TOKEN"
@@ -268,6 +281,9 @@ func parseEntry(row map[string]any) (Entry, error) {
 	}
 	if entry.Secrets["api_key"] == "" {
 		delete(entry.Secrets, "api_key")
+	}
+	if entry.Provider.Model != "" && len(entry.Models) == 0 {
+		entry.Models = []provider.Model{{ProviderID: entry.Provider.ID, ModelID: entry.Provider.Model, IsDefault: true}}
 	}
 	if err := removeCredentialCopies(&entry); err != nil {
 		return Entry{}, err

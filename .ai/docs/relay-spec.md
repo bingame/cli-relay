@@ -1,13 +1,15 @@
-# Relay 技术规格说明书 v0.1
+# Relay 技术规格说明书 v0.5
 
 > 一句话定位：Relay 是一个本地优先的命令行工具，负责「用哪个供应商/哪份配置启动哪个 AI Agent CLI」以及「一段会话如何在供应商/CLI 之间语义交接」，不重新实现任务队列/自动重试（那是 Multica 等编排器的职责），但提供干净的集成点供它们调用。
+
+> **v0.5 变更**：Codex 的 `$CODEX_HOME/<id>.config.toml` profile 文件与主配置文件 `~/.codex/config.toml` 的继承关系确认为分层覆盖（overlay），profile 文件不需要重复声明 `[model_providers.<id>]`，`render()` 简化为只写一份进主配置文件；§13 开放问题 1 标记为已解决。
 
 ---
 
 ## 0. 背景与非目标
 
 ### 0.1 要解决的问题（背景）
-1. Codex 切 model provider 后无法继续会话（官方 discovery 逻辑按当前激活 provider 过滤，历史数据其实还在）。
+1. Codex 切 model provider 后无法继续会话（官方 discovery 逻辑按当前激活 provider 过滤，历史数据其实还在）。**补充确认**：跨 provider resume 不只是 discovery 隐藏的问题，Claude Code 官方文档明确指出历史记录里若含有上一个 provider 网关"翻译"过的工具调用格式，换 provider 继续可能触发 400 错误，这类清理只在直连官方 API 时才做——即跨 provider resume 在协议层面本身就有风险，不是"绕开 discovery 就万事大吉"，这进一步印证了 §9 Handoff 机制的必要性（见该节更新）。
 2. 跨 Agent CLI（Claude Code ↔ Codex ↔ Cursor Agent 等）没有原生的会话共享机制。
 3. 长会话（尤其夹带大量图片）异常中断后，重试会重发整个巨大请求体，容易再次失败；需要能压缩/整理成 Markdown 供新会话续接。
 4. 需要在全局默认配置之外，为单个新启动的 CLI 实例临时指定另一个供应商，多实例互不干扰。
@@ -93,15 +95,30 @@ flowchart TB
 
 ```sql
 CREATE TABLE providers (
-    id            TEXT PRIMARY KEY,      -- slug, 如 "my-provider1"
-    display_name  TEXT NOT NULL,
+    id            TEXT PRIMARY KEY,      -- slug, 由 display_name 归一化而来, 如 "my-grok-relay"
+    display_name  TEXT NOT NULL,         -- 手动创建时用户自定; 从 cc-switch 导入时直接取其供应商名称
     targets       TEXT NOT NULL,         -- JSON 数组: ["claude-code","codex"]
     base_url      TEXT,
-    model         TEXT,
-    extra_json    TEXT,                  -- 各 CLI 私有字段透传, JSON
+    model         TEXT,                  -- 默认模型 id
+    secret_mode   TEXT,                  -- "env_key" | "auth_command"; 仅 codex 有意义, claude-code 恒为文件内联
+    extra_json    TEXT,                  -- 极少数无法归类的 CLI 私有字段兜底透传, JSON (不再作为主要机制, 见下方"导入字段白名单")
     source        TEXT,                  -- "manual" | "cc-switch-import"
+    status        TEXT DEFAULT 'active', -- "active" | "disabled" (被 cc-switch 同步判定为失效时置为 disabled, 见 §6)
+    content_hash  TEXT,                  -- 该记录内容的哈希, 供渲染缓存判断是否需要重新渲染(见 §5.4)
     created_at    TEXT,
     updated_at    TEXT
+);
+
+-- 模型目录: 对应 Codex 的 model_catalog_json 与 Claude Code 的 modelPicker.options,
+-- 两者本质是同一个概念(自定义模型列表+展示名), 提升为一等数据, 由各 Adapter 自行渲染成目标格式
+CREATE TABLE provider_models (
+    provider_id    TEXT NOT NULL,
+    model_id       TEXT NOT NULL,        -- 如 "deepseek-v4-flash"
+    display_name   TEXT,
+    context_window INTEGER,
+    is_default     BOOLEAN DEFAULT 0,
+    sort_order     INTEGER,
+    PRIMARY KEY (provider_id, model_id)
 );
 
 CREATE TABLE provider_secrets (
@@ -116,11 +133,14 @@ CREATE TABLE import_log (
     source        TEXT,                  -- "cc-switch"
     file_hash     TEXT,
     imported_at   TEXT,
+    seen_provider_ids TEXT,              -- 本次导出快照里出现的 provider id 列表(JSON数组), 供 §6 失效检测比对
     raw_snapshot  TEXT                   -- 原始 mcp_servers/prompts 表内容，先存起来不解析
 );
 ```
 
 密钥加密：MVP 用操作系统 keychain（macOS Keychain / Linux libsecret，通过成熟库调用）；无 keychain 环境下退化为本地对称加密（密钥派生自机器 ID + 用户口令，首次运行时提示设置）。**绝不使用可逆的简单混淆代替加密。**
+
+`secret_mode` 说明：两个 target CLI 都支持"回调式取密钥"（Codex 是 `auth.command`，Claude Code 是 `apiKeyHelper`），默认都用 `callback` 模式，二者共用同一个 `relay secret get <cli> <provider_id>` 实现；`env_key`/`env_inline` 作为可选降级路径保留。这两个 Adapter 在密钥机制上现在是对称的，不存在能力差异。
 
 ### 3.2 `~/.relay/rendered/<target_cli>/<provider_id>.*`
 每个 Adapter 决定自己的产物格式：
@@ -147,6 +167,7 @@ relay provider add --id <id> --target <cli>... --base-url <url> --model <m> [--a
 relay provider remove <id>
 relay provider render-args <cli> <provider_id>      # 输出该 CLI 需要的 argv 片段(JSON 数组), 给 Multica custom_args 用
 relay provider render-env  <cli> <provider_id>      # 输出该 CLI 需要的 env 片段(KEY=VALUE 逐行), 给 Multica custom_env-file 用
+relay secret get <cli> <provider_id>                # 内部/回调用: 解密并仅打印密钥本体到 stdout, 供 apiKeyHelper/auth.command 调用
 
 relay switch <provider_id> [--target <cli>]         # 改全局默认；不指定 --target 则对 provider.targets 里所有 target 都切
 relay status                                        # 展示每个 target 当前 provider + 正在运行的 relay 管理的实例列表
@@ -157,8 +178,6 @@ relay exec <cli> [--provider <id>] [-- <原生参数...>]   # 无头/受监管�
 relay handoff export  [--session <id>] --cli <cli> [--live | --dead] [-o <path>]
 relay handoff continue --doc <path> --cli <cli> [--provider <id>]
 relay handoff schema                                # 打印/校验 Handoff Doc 的 JSON Schema，供 Skill 引用
-relay skill install [--cli claude-code,codex]        # 默认探测本机 CLI；显式指定时可提前离线安装
-relay --version                                    # 发布版本；go install 读取模块构建版本
 ```
 
 退出码约定（供 `exec` 和外层编排器消费，见 §8.3）：`0` 成功；`10` 可重试的基础设施错误；`11` 检测到需要人类介入（如触发了 AskUserQuestion 类工具）；`12` 会话历史损坏需要冷启动重试；其余非零为未分类错误。
@@ -169,13 +188,16 @@ relay --version                                    # 发布版本；go install �
 
 ```ts
 interface LaunchAdapter {
-  // 渲染阶段：导入/新增 provider 时调用一次，产出 Rendered Artifact
-  render(provider: Provider): RenderedArtifact;
+  // 渲染阶段：provider 记录变化时调用（新增/导入/更新），产出 Rendered Artifact。
+  // 必须是幂等的纯函数：相同 Provider 内容 -> 相同产物，用于 §5.4 的 hash 校验。
+  render(provider: Provider, models: ProviderModel[]): RenderedArtifact;
 
   // 全局切换：把 Rendered Artifact 合并进该 CLI 的全局原生配置文件
   applyGlobal(artifact: RenderedArtifact): void;
 
   // 临时启动：返回本次 spawn 需要的 argv 片段 + env 片段，不落盘、不改全局文件
+  // （若该 Adapter 的密钥机制是回调式如 Codex 的 auth.command，env 片段可能为空，
+  //   因为密钥解析发生在目标 CLI 内部对 Relay 的再次调用，而不是这里）
   buildLaunchInputs(artifact: RenderedArtifact, secrets: ResolvedSecrets): {
     argv: string[];
     env: Record<string,string>;
@@ -184,30 +206,99 @@ interface LaunchAdapter {
   // 会话恢复所需的原生 flag，供 exec 模式和 Handoff 三级 fallback 第 2 层使用
   resumeArgs(sessionId: string): string[];
 
-  // 安装随二进制内嵌的交接 Skill；targetDir 为 relay-handoff 目录
-  installSkill(targetDir: string): void;
+  // 把内嵌进 Relay 二进制的 handoff SKILL.md 写到该 CLI 认的全局 skill 路径（见 §5.5）
+  installSkill(skillContent: []byte): void;
 }
 ```
 
-Go 接口对应 `InstallSkill(targetDir string) error`（概念契约 `installSkill(targetDir string) error`）。Claude Code 和 Codex Adapter 分别实现。默认写入 `~/.claude/skills/relay-handoff/SKILL.md` 和 `~/.codex/skills/relay-handoff/SKILL.md`；分别遵循 `CLAUDE_CONFIG_DIR` 与 `CODEX_HOME`。不依赖网络、供应商配置或凭据库。相同内容重复安装不产生重复副本；Relay 管理且未经手改的内容可升级，遇到用户修改或同名手动文件时保留并明确报错。
+### 5.1 ClaudeCodeAdapter
 
-### 5.1 ClaudeCodeAdapter（一段式）
-- `render()` 产出 settings JSON，包含非敏感 `env`（`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL` 等）、`permissions`、`model` 等受支持字段；鉴权凭据不写入配置。另生成随二进制内嵌的 Handoff 插件。
+Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不是把明文塞进 `env` 块**：`apiKeyHelper` 设置指向一个脚本，Claude Code 需要密钥时调用它、取 stdout 作为凭据。**关键约束（官方认证优先级决定，必须遵守）**：Claude Code 的凭据优先级从高到低是「云厂商 > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper` > ...」——如果渲染出来的 `env` 块里还留着 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，`apiKeyHelper` 根本不会被用到。所以：
+
+- `render()` 产出的 settings JSON 默认形如：
+  ```json
+  {
+    "env": { "ANTHROPIC_BASE_URL": "<base_url>" },
+    "apiKeyHelper": "relay secret get claude-code <id>",
+    "modelPicker": { "options": [ /* 由 provider_models 渲染而来 */ ], "replaceBuiltInOptions": true }
+  }
+  ```
+  `env` 块里**只放 `ANTHROPIC_BASE_URL`（非凭据，不参与优先级竞争）**，不放任何密钥字段，密钥完全交给 `apiKeyHelper` 回调 `relay secret get`。
+- `relay secret get claude-code <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
+- 刷新间隔默认 5 分钟（`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` 可调），与 Codex 的 `refresh_interval_ms` 默认值（300000ms）刚好对称，两个 Adapter 的密钥回调设计可以共享同一套心智模型。
+- `env_key`/明文写入 `env` 块的方式依然作为可选降级路径保留（`secret_mode = "env_inline"`），供不方便跑回调命令的场景使用；此时 `renders()` 产出的 settings 文件里才会真正含有明文，需要 `0600` 权限保护。
 - `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`（保留其余用户已有 key，只覆盖 Relay 管理的字段，用注释/标记块界定 Relay 管理范围，避免覆盖用户手工添加的其他配置）。
-- `buildLaunchInputs()`：使用 `--setting-sources "" --settings <rendered_file_path>` 隔离供应商设置，密钥仅注入子进程环境。实测空 setting-sources 同时关闭用户 Skill，因此通过 `--plugin-dir <Relay生成的handoff-plugin目录>` 显式加载自带 Handoff，插件命令为 `/relay:relay-handoff`；不重新启用全局 settings 或其他用户插件。依据见 Claude Code `NOTES.md`。
+- `buildLaunchInputs()`：`argv = ["--settings", <rendered_file_path>]`，`env = {}`（默认路径下密钥走 `apiKeyHelper` 回调，不需要 Relay 额外注入进程环境；`env_inline` 降级路径下同样不需要额外注入，因为密钥已经在渲染文件里）。
 - `resumeArgs(id)`：`["--resume", id]`。
 
-### 5.2 CodexAdapter（两段式，务必分离 argv 与 env）
-- `render()` 产出：
-  - `config.toml` 片段：`[model_providers.<id>]`（`base_url`、`env_key = "RELAY_<ID>_KEY"`，**不含明文**）+ `[profiles.<id>]`（`model_provider`、`model`）。
-  - 记录该 provider 密钥应绑定的 env 变量名 `RELAY_<ID>_KEY`（大写、下划线，避免与用户已有变量冲突）。
-- `applyGlobal()`：把 `[model_providers.<id>]`/`[profiles.<id>]` 合并进 `~/.codex/config.toml`，用可识别的注释块标出 Relay 管理的 section，不覆盖用户手工维护的其他 profile；同时把顶层 `model`/`model_provider` 指针改成这个 profile（全局切换语义）。
-- `buildLaunchInputs()`：`argv = ["--profile", id]` 或 `["-c", "model_provider=" + id]`（二选一，实现时先探测当前 Codex 版本更推荐哪种，写成配置项而非硬编码），`env = { "RELAY_<ID>_KEY": <明文密钥> }`。
-- **必须验证** `RELAY_<ID>_KEY` 出现在 Codex 自己的 `shell_environment_policy`/env allowlist 里；若 Codex 版本要求显式声明允许的变量名前缀，Adapter 需要在 `applyGlobal()`/`buildLaunchInputs()` 时一并写入/检测这条配置，并在集成测试里覆盖「设置了变量但 Codex 读不到」这个已知坑。
-- `resumeArgs(id)`：视 Codex 当前版本的 resume 子命令语法而定（`exec resume <id>` 或 `--resume <id>`），实现前需在目标 Codex 版本上验证一次，不要假设语法长期不变。
+### 5.2 CodexAdapter（两段式：argv 选 profile，密钥走独立通道）
+
+Codex 支持三种密钥来源（官方文档确认），Relay 只使用前两种，第三种明确排除：
+
+| 方式 | 机制 | Relay 是否使用 |
+|---|---|---|
+| `env_key` | 声明一个环境变量名，值由外部注入 | 支持，作为可选降级 |
+| `auth.command` | 声明一条命令，Codex 需要时执行它，取 stdout 作为 token | **默认**，见下 |
+| `experimental_bearer_token` | 明文写死在 config.toml 里 | **不使用**，官方文档本身也不建议 |
+
+**默认用 `auth.command` 回调 Relay 自己，而不是 Relay 主动注入 env**：
+
+**产物结构（已根据官方澄清修正——之前认为 `[profiles.<id>]` 与 `--profile` 对应是错的）**：Relay 为 Codex 渲染两个不同的东西，职责不同：
+
+1. **`[model_providers.<id>]` 注册表 → 写进主配置文件 `~/.codex/config.toml`**，作为"这个 provider 长什么样"的定义，`switch`/`run`/`exec` 三条路径共用同一份，不重复渲染：
+   ```toml
+   [model_providers.<id>]
+   name     = "<display_name>"     # 纯展示名, 与 id/profile 文件名无关
+   base_url = "<base_url>"
+   wire_api = "responses"
+
+   [model_providers.<id>.auth]
+   command = "relay"
+   args    = ["secret", "get", "codex", "<id>"]
+   timeout_ms = 5000
+   refresh_interval_ms = 0   # 见下方说明: relay secret get 本地读 keychain, 快且稳定, 0 是官方建议的最合适取值
+   ```
+   `refresh_interval_ms = 0` 的含义是禁用主动定时刷新，只在认证重试时才重新执行命令（不是"只调用一次"）；这要求 `relay secret get` **只把 token 打到 stdout，任何诊断/调试信息必须走 stderr**，哪怕一行调试日志混进 stdout 也会被 Codex 当作 token 的一部分，这条要写进实现约束，不能只在文档里提一句。
+2. **`model_provider`/`model`/`model_catalog_json` 选择器 → 写进独立的 profile 文件 `$CODEX_HOME/<id>.config.toml`**（`--profile <id>` 真正加载的就是这个文件，不是主配置文件里的某个小节）：
+   ```toml
+   model_provider     = "<id>"
+   model               = "<model>"
+   model_catalog_json  = "~/.relay/rendered/codex/<id>.catalog.json"   # 由 provider_models 渲染而来
+   ```
+   **`<id>` 这个 slug 在 Relay 里被有意统一成三件事共用**：Relay 自己的 provider id、`model_providers.<id>` 的 id、以及这个 profile 文件名——这三者在 Codex 官方语义里本来是互相独立的命名空间，Relay 为了减少心智负担才把它们收敛成一个，不是 Codex 的强制要求。
+
+   **继承机制已确认**：Codex 的配置是分层覆盖（overlay）——先加载 `$CODEX_HOME/config.toml`，再加载 `$CODEX_HOME/<id>.config.toml`，profile 文件里的同名字段覆盖主配置，未出现的字段（比如 `model_providers.<id>` 整块）直接继承主配置。所以 profile 文件**不需要重复声明** `[model_providers.<id>]`，`render()` 只需要写一份进主配置文件即可，不用再冗余写两份（这一点是通过 Codex 官方助手的回答确认的，不是静态文档页面的直接引用，实现时建议保留一次快速冒烟测试作为廉价的二次确认，但不必再默认冗余写入）。
+
+这份产物**从头到尾不含任何明文密钥**，因为密钥解析被推迟到 Codex 实际调用 `relay secret get codex <id>` 的那一刻，由 Relay 自己的 keychain 现算现吐（官方文档确认命令契约：只需把 token 打到 stdout、退出码 0，首尾空白会被自动 trim）。
+- 新增子命令 `relay secret get <cli> <provider_id>`：只做一件事——从加密存储解出明文，仅打印到 stdout，不打印任何其他内容，不写日志、不落文件；Claude Code 和 Codex 共用同一个实现（见 §5.1），因为二者的回调契约本质相同（跑一个命令、拿 stdout 当凭据）。
+- 好处：渲染出来的全局 profile 是**自包含的**，用户不经过 `relay run/exec`、直接 `codex --profile <id>` 也能正常工作，因为密钥回调不依赖 Relay 是不是那个 spawn 者；同时因为产物不含明文，§5.4 的持久化缓存策略对 Codex（以及默认配置下的 Claude Code）不需要考虑"密钥留存时长"这个顾虑，可以放心一直缓存。
+- `env_key` 降级路径（可选，用户主动要求时启用）：产出 `env_key = "RELAY_<ID>_KEY"`（不含明文），`buildLaunchInputs()` 才需要现算 `env = { "RELAY_<ID>_KEY": <明文> }` 注入子进程；**必须验证** `RELAY_<ID>_KEY` 出现在 Codex 自己的 `shell_environment_policy`/env allowlist 里，若 Codex 版本要求显式声明允许的变量名前缀，需在 `applyGlobal()` 时一并写入这条配置，并在集成测试里覆盖「设置了变量但 Codex 读不到」这个已知坑。`auth.command`/`env_key`/`experimental_bearer_token` 三者互斥，不能同时配置（官方文档明确要求），Relay 也明确不生成 `experimental_bearer_token`。
+- **额外发现的功能性差异（不只是安全考虑）**：部分 OpenAI 兼容中转站文档提到，用 `env_key` 模式时 Codex 不会主动拉取该 provider 的模型目录，非官方模型会出现"Unknown model"警告；用 `auth.command` 模式则没有这个问题。Relay 因为自己用 `provider_models` 管理模型目录、渲染成 `model_catalog_json`，不依赖 Codex 主动拉取，所以这一点对 Relay 不是刚需，但作为默认选 `auth.command` 的又一个佐证列在这里。
+- `buildLaunchInputs()`（两种密钥模式通用）：`argv = ["--profile", id]`（现已确认对应 `$CODEX_HOME/<id>.config.toml` 这个独立文件，见上方产物结构说明）。
+- `applyGlobal()`（对应 `switch`，与 `run`/`exec` 走的路径不同）：把 `[model_providers.<id>]`（含 `.auth`）写/更新进主配置文件 `~/.codex/config.toml` 的注册表部分（这一步 `switch`/`run`/`exec` 都需要，保证 provider 已定义），然后**额外在主配置文件顶层直接设置 `model_provider = "<id>"`、`model = "<model>"`**——这才是真正"不带任何 flag 直接跑 `codex` 也生效"的全局默认，和 `run`/`exec` 用的 `--profile` 选择器文件是两条不同路径，不要合并成一个。
+- `resumeArgs(id)`：视 Codex 当前版本的 resume 子命令语法而定（`exec resume <id>` 或 `--resume <id>`），实现前需在目标 Codex 版本上验证一次，不要假设语法长期不变。**同时注意 §0.1 第 1 点的结论：跨 provider 场景下即使拿到了正确的 resume 语法，也应默认走 Handoff 而非直接 resume，resumeArgs 主要服务于同 provider 内的场景和 Handoff 第 2 级 fallback。**
 
 ### 5.3 密钥永不进入 argv
-两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见），不写配置文件，只能经子进程环境变量注入；仅明确调用 `render-env` 时输出。配置产物仍使用私有权限。
+两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见）。允许的载体只有：(a) 文件内容（`env_inline`/`env_key` 降级路径下的渲染文件，权限 `0600`）；(b) 直接注入子进程环境变量表（`env_key` 降级路径）；(c) 通过 `relay secret get` 的 stdout 管道直传给调用它的进程（**两个 Adapter 的默认路径**——Claude Code 走 `apiKeyHelper`，Codex 走 `auth.command`，这是三者里暴露面最小的一种，因为不经过任何持久化环境变量表，也不落任何配置文件）。
+
+### 5.4 渲染缓存策略
+
+渲染产物默认**持久化缓存**在 `~/.relay/rendered/<cli>/<provider_id>.*`，而不是每次现算现删，原因：可调试（用户能直接打开看到"这次到底会传什么"）、可手动二次编辑（用户想要一份能自己改的起点时，这是唯一能满足的形态）。为了消除持久化缓存最大的缺点——陈旧——引入内容 hash 机制：
+
+- `providers.content_hash` 存该记录（含关联的 `provider_models`）序列化后的哈希。
+- 任何读取渲染产物之前（`switch`/`run`/`exec`/`render-args`/`render-env`），先比对当前记录算出的 hash 与渲染产物里记录的 hash（渲染产物自身也存一份来源 hash，比如 Claude Code settings JSON 里放一个 Relay 专用的隐藏字段，Codex 的 toml 片段放一行注释）；不一致就视为陈旧，先重新 `render()` 再使用。这样用户不需要记得手动 refresh，缓存永远等价于"和 DB 一致的最新渲染结果"。
+- 若用户手动改过渲染产物本身（文件内容 hash 与 Relay 上次写入时记录的不一致，但 DB 记录没变），视为「用户手动定制」，重新渲染前需要确认（`是否覆盖你的手动修改? [y/N]`），不静默覆盖。
+- **默认配置下（两个 Adapter 都走回调式密钥机制：Claude Code 的 `apiKeyHelper`、Codex 的 `auth.command`），渲染产物里不含任何明文密钥，可以放心一直持久化缓存，不需要考虑密钥留存时长的问题**——这也是为什么本 spec 默认两个 Adapter 都用回调机制而不是明文注入：不仅安全性更好，还顺带让缓存策略对两个 Adapter 保持统一，不需要区别对待。
+- `--ephemeral` 可选模式：只在用户主动选择 `env_inline`/`env_key` 这类明文降级路径时才有意义（默认路径下没有明文可言，开这个选项没有收益）。不写入 `rendered/` 目录，而是写到 `~/.relay/tmp/` 下的一次性文件，`exec` 模式下子进程退出后立即删除；**`run` 模式因为是 execve 替换、Relay 进程在那一刻就已经不存在，无法保证启动后立即清理，只能做成「写入 tmp 目录 + 下次调用前清理上一批」这种尽力而为的垃圾回收，不能承诺"用完立刻消失"**——这个限制需要如实告知用户，不要在文档或提示语里做出做不到的保证。
+
+### 5.5 Skill 安装
+
+Relay 遵循开放的 **Agent Skills specification**（`agentskills.io`），复用其公开维护的「每个 agent 的 skill 全局安装路径」约定，不依赖 `npx skills` 运行时（避免引入 Node 依赖），只是照着同一份路径表和 `SKILL.md` 格式自己实现写文件逻辑：
+
+- Claude Code：`~/.claude/skills/relay-handoff/SKILL.md`
+- Codex：`~/.codex/skills/relay-handoff/SKILL.md`（Codex 目前已原生支持标准 `SKILL.md` 格式）
+
+Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格绑定，不单独发版。`installSkill()` 用**覆盖写入**语义（不是 §5.4 那种 symlink/单一源模式，因为 canonical copy 活在二进制里而不是磁盘上）；`relay skill install [--cli claude-code,codex]` 默认探测本机已装的 target CLI 逐一安装，`relay skill update` 等价于「升级 Relay 后重新跑一次 install」，不需要单独的 update 生命周期。安装脚本（`curl | sh`）末尾默认自动跑一次此命令，同时保留独立子命令供后续单独触发。
 
 ---
 
@@ -219,13 +310,20 @@ Go 接口对应 `InstallSkill(targetDir string) error`（概念契约 `installSk
 1. 读取文件前 N 字节，校验是否包含 `CC_SWITCH_SQL_EXPORT_HEADER` 标记；不匹配则报错拒绝导入（防止误吃到无关 .sql 文件）。
 2. 在内存 SQLite（或临时文件 SQLite）中执行整份脚本，重建出临时数据库。
 3. 执行 `SELECT id, app_type, name, settings_config, meta, is_current FROM providers;`（列名以实际 schema 为准，若与本 spec 假设不符，以运行时探测到的列为准，不要硬编码假设失败即报错并打印实际列名供人工确认）。
-4. 对每一行：
+4. 对每一行，**按白名单只提取"用户级"字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走：
    - `app_type` → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
-   - `settings_config`（JSON 字符串）反序列化，提取 `base_url`/`api_key`/`model` 等字段写入 `providers` 表 + `provider_secrets` 表（密钥立刻加密存储，不落中间文件）。
-   - `name` → `display_name`；`id` 若与本地已有冲突，加后缀 `-imported-N` 并在导入报告里列出，不静默覆盖。
-5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据。
-6. `is_current` 为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**。
-7. `--dry-run`：只做到第 4 步的解析结果展示，不写入 `providers.db`。
+   - `settings_config`（JSON 字符串）反序列化，白名单字段：`base_url`/`api_key`（→ `provider_secrets`，立刻加密，不落中间文件）/默认 `model`/**模型目录相关字段（Codex 的 `model_catalog_json` 内容、Claude Code 的 `modelPicker.options`）→ 写入 `provider_models` 表**，不塞进 `extra_json`（见 §3.1 变更）。
+   - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）；本地是否已存在同一个 provider 由 `(target, slugify(display_name))` 判断，不用 cc-switch 的内部 `id`（那是 UUID，用户在 cc-switch 里删了重建同名 provider 时会变，但语义上仍是"同一个"）。命中即按 `--on-conflict` 参数处理：
+     - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
+     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目。
+5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据；若这两张表里含凭据类内容需先加密再存（见 §10 安全要求第 4 条）。
+6. **失效清理**：把本次导出快照里出现的所有 provider 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
+   - 默认：只在导入报告里列出这些记录，不做任何改动。
+   - `--prune`：把它们的 `status` 置为 `disabled`（软删除，数据保留）；`switch`/`run` 引用到 `disabled` 的 provider 时报错并提示"已被 cc-switch 同步标记为失效"，而不是静默找不到。
+   - 物理删除是单独的命令 `relay provider prune --hard`，只清理已经 `disabled` 的记录，不作为 import 流程的自动副作用。
+   - **`source = "manual"` 的记录永远不受这套清理逻辑影响**，无论是否出现在 cc-switch 的导出快照里。
+7. `is_current` 为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**。
+8. `--dry-run`：只做到第 4 步的解析结果展示，不写入 `providers.db`。
 
 ---
 
@@ -304,9 +402,7 @@ front-matter 里的字段是机器读取的元数据；正文各节标题固定�
 **第 1 级 — 活 agent 对话（首选，保真度最高）**
 - 通过一个标准触发词/斜杠命令（如 `/handoff`）或对应 CLI 的 Skill 机制，让当前正在运行、仍持有完整上下文（含未落盘的中间推理）的 agent 自己按 §8.1 schema 输出。
 - 实现为一个 Skill（`SKILL.md` + 触发描述），理由：复用当前 agent 已在内存里的上下文，比事后重新解析日志文件保真度更高；且声明式的 Skill 比写死在 Relay 代码里的 prompt 更容易迭代、不需要重新发版 Relay 本体。
-- Codex 原生支持 `SKILL.md` 格式（[OpenAI 官方 Agent Skills 文档](https://developers.openai.com/codex/skills/)），格式见 [Agent Skills specification](https://agentskills.io/specification)。当前官方文档推荐用户路径 `~/.agents/skills`；本项目按指定路径使用 `$CODEX_HOME/skills`（默认 `~/.codex/skills`），已在 Codex 0.154.0 的 `skills/list` 中实测仍原生加载，见 Codex `NOTES.md`。这不是未解决的开放问题。
-- Skill 内容通过 Go embed 随单一二进制分发。`relay skill install [--cli claude-code,codex]` 默认只为 PATH 或 `RELAY_*_BIN` 可探测到的 CLI 安装；不会执行 CLI 探测，也不会安装目标 CLI 本体。显式 `--cli` 可以在目标 CLI 尚未安装时提前部署。没有探测到目标时给出后续操作提示并成功退出。
-- 两端一行安装器末尾默认运行一次 `relay skill install`；Homebrew/Scoop 使用安装后钩子。手动下载或 `go install` 后保留独立子命令。`relay handoff schema` 提供当前 schema；Skill 升级随 Relay 更新，用户手动修改受保护。
+- Relay 侧只需提供：Skill 内容本身（一份可被 `install-skill-from-github.py` 之类工具安装的 SKILL.md）+ `relay handoff schema` 命令供 Skill 引用最新 schema，防止 Skill 和 Relay 的 schema 版本漂移。
 
 **第 2 级 — agent 已退出，但会话未损坏 → 无头 resume 后触发同一个 Skill**
 - 不直接解析本地会话文件（官方文档明确这类文件格式属于内部实现细节、版本间会变，自建解析器脆弱）。
@@ -351,7 +447,7 @@ multica agent create --name my-agent --runtime-id codex \
 ## 10. 安全要求汇总（贯穿全 spec，此处集中列出供实现自检）
 1. 明文密钥只允许出现在：`provider_secrets` 表的加密列、即将 spawn 的子进程环境变量表。**不允许**出现在：任何 argv、任何日志输出、Handoff Doc、`render-args` 的输出。
 2. `render-env` 的输出本身包含明文（因为下游就是要拿它当 env 用），文档要显式警告调用方"这是敏感输出，不要打印到共享终端/CI 日志"。
-3. Codex 的 `config.toml` 片段只写 `env_key`（变量名），不写明文；Claude Code settings 也不写鉴权凭据，凭据由进程环境注入。配置文件使用 `0600`（Windows 对应用户 ACL）。
+3. 默认配置下（回调式密钥），Codex 的 `config.toml` 片段只写 `auth.command`/`args`，Claude Code 的 settings 文件只写 `apiKeyHelper`，两者都不含任何明文；只有用户主动切到 `env_key`/`env_inline` 降级路径时才会产生含明文的文件，此时该文件权限必须设为 `0600`，且不纳入任何自动同步/备份的路径。
 4. `import_log.raw_snapshot` 里如果 cc-switch 的 `mcp_servers` 表包含凭据（部分 MCP server 配置会带 token），也要在存储前做加密，不能因为「本版本不解析它」就当作普通数据明文存放。
 5. 所有对外部文件系统路径的操作（尤其是 Handoff Doc 读取、cc-switch 导入文件读取）要做路径校验，防止路径穿越。
 
@@ -380,22 +476,9 @@ multica agent create --name my-agent --runtime-id codex \
 ---
 
 ## 13. 开放问题（实现前需要确认或探测，不要假设）
-1. Codex 当前版本 `--profile` 与 `-c model_provider=` 两种方式哪个更被推荐/更稳定，需要在目标 Codex 版本上实测。
-2. Codex `shell_environment_policy` 的 allowlist 具体配置语法（需要确认是否需要在 `config.toml` 里显式声明 `RELAY_*` 前缀允许通过）。
+1. **（已解决）** Codex 的 `--profile <name>` 已确认对应 `$CODEX_HOME/<name>.config.toml` 独立文件，`[profiles.<name>]` 小节与此无关。继承关系也已确认为分层覆盖（先加载主配置、再加载 profile 文件、同名字段覆盖），profile 文件不需要重复声明主配置里已有的 `[model_providers.<id>]`。这条信息来自 Codex 官方助手的回答而非静态文档页面，建议实现后跑一次真实的 `--profile` 冒烟测试做二次确认，但不必再假设需要冗余写入。
+2. Codex `shell_environment_policy` 的 allowlist 具体配置语法（仅 `env_key` 降级路径需要，默认的 `auth.command` 路径不涉及子进程环境变量继承问题，优先级降低但仍需在降级路径的测试里覆盖）。
 3. cc-switch `providers` 表的完整列定义（本 spec 依据的是间接来源，导入器实现时应先做一次 `SELECT * FROM providers LIMIT 1` 打印实际列名核对，再固化字段映射，不要硬编码列顺序）。
 4. Claude Code settings 文件的「Relay 管理区块」如何与用户手工编辑的其余内容共存而不冲突，建议用注释标记 + 首次写入前询问用户确认覆盖范围。
 5. 是否需要支持 `cursor-agent` 作为 P0/P1 范围内的第三个 Adapter，还是留到后续版本——取决于用户自己的实际使用频率。
-
----
-
-## 14. 产品分发与一行安装
-
-- 使用 GoReleaser 与 GitHub Actions。在推送 `v*` tag 时，先通过三系统测试、安装器回归和五平台快照检查，再以 `CGO_ENABLED=0` 发布 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`、`windows/amd64`。用户不需要 Go、Node、Python 或 SQLite 运行时。
-- Unix 产物为 `relay-<os>-<arch>.tar.gz`；Windows 同时提供 `relay-windows-amd64.exe` 和供 Scoop 使用的 zip。Release 附带 `checksums.txt`、两端安装脚本、Homebrew formula、Scoop manifest。
-- Linux/macOS 一行入口为 `curl -fsSL https://get.relay.sh | sh`。探测 uname，下载固定 tag 产物、校验 SHA-256 后安装到 `~/.local/bin`（自动创建）；不可写才回退 `/usr/local/bin`，需要 sudo 时提示。持久化 PATH 并提示如何在当前父 shell 生效。
-- Windows 一行入口为 `irm https://get.relay.sh/install.ps1 | iex`。下载并校验 amd64 exe，安装为 `%LOCALAPPDATA%\Relay\bin\relay.exe`，更新当前进程与用户 PATH。使用系统环境变量 API，避免 `setx PATH` 的截断问题。
-- SHA-256 校验或下载失败不得覆盖现有二进制；通过校验后采用同目录临时文件原子替换。默认运行 Skill 安装；Skill 失败明确返回非零并提示修复命令。
-- 支持 `RELAY_VERSION`、`RELAY_INSTALL_DIR`、`RELAY_REPOSITORY`、`RELAY_SKIP_SKILLS`、`RELAY_NO_MODIFY_PATH`，不引入常驻更新器。当前先使用现有私有仓库 `bingame/cli-relay`，`RELAY_DOWNLOAD_MODE=gh` 复用已授权 GitHub CLI 下载；不要求 token 出现在 argv 或配置中。匿名 curl/irm 入口等待公开发行资源，不依赖未准备的域名即可完成私有安装。
-- Homebrew 使用 tap formula（包括 Linux），Scoop 先添加 bucket 再 `scoop install relay`。生成和推送由 GoReleaser 完成；软件源仓库与授权 token 必须配置一次。`relay-cli/tap` 需要对应组织和仓库已建立，默认使用实际仓库所有者 `bingame`，可通过 CI Variables 改写。
-- Go 开发者可执行 `go install github.com/bingame/cli-relay/cmd/relay@latest`，然后 `relay skill install`。v0.1 不包含 apt/deb 或 winget。
-- 公共域名入口和软件源不是本地构建自动获得的资源；公开发行地址、域名 HTTPS 和软件源配置完成后才可宣布一行安装上线。部署资源与准确步骤见 `distribution/NOTES.md`。
+6. `relay secret get` 作为 Codex/Claude Code 的回调命令被调用时，需要确认两边各自的调用环境（工作目录、能否找到 `relay` 在 `PATH` 里、跑在什么 shell 下）是否会影响 keychain 解密所需的权限上下文（例如 macOS Keychain 有时对"哪个可执行文件在请求"有访问控制），实现前用真实的 `apiKeyHelper`/`auth.command` 触发路径测一遍，不要只测「手动在终端跑 `relay secret get`」这种和真实调用环境不同的场景。

@@ -15,7 +15,7 @@ type Adapter struct {
 
 func (a *Adapter) Target() string            { return a.Name }
 func (a *Adapter) InstallSkill(string) error { return nil }
-func (a *Adapter) Render(p provider.Provider, root string) (adapter.Artifact, error) {
+func (a *Adapter) Render(p provider.Provider, root string, _ ...provider.Model) (adapter.Artifact, error) {
 	return adapter.Artifact{Target: a.Name, ProviderID: p.ID}, nil
 }
 func (a *Adapter) ApplyGlobal(adapter.Artifact, string) error { a.Applied = true; return nil }

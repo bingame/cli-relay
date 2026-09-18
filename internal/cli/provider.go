@@ -16,6 +16,7 @@ import (
 
 func (a *App) providerCommand() *cobra.Command {
 	parent := &cobra.Command{Use: "provider", Short: "管理、导入和渲染供应商"}
+	var hardPrune bool
 	var p provider.Provider
 	var keyStdin bool
 	add := &cobra.Command{Use: "add", Short: "添加供应商，凭据通过标准输入读取", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -57,14 +58,18 @@ func (a *App) providerCommand() *cobra.Command {
 				return fmt.Errorf("供应商 ID 已存在: %s", p.ID)
 			}
 		}
+		models := []provider.Model{}
+		if p.Model != "" {
+			models = append(models, provider.Model{ProviderID: p.ID, ModelID: p.Model, IsDefault: true})
+		}
 		for _, target := range p.Targets {
 			if ad, ok := a.Adapters[target]; ok {
-				if _, e = ad.Render(p, a.Home); e != nil {
+				if _, e = ad.Render(p, a.Home, models...); e != nil {
 					return e
 				}
 			}
 		}
-		if e = store.Add(cmd.Context(), p, sec); e != nil {
+		if e = store.Import(cmd.Context(), []provider.Entry{{Provider: p, Secrets: sec, Models: models}}, "", nil); e != nil {
 			return e
 		}
 		return outputJSON(cmd, p)
@@ -74,6 +79,7 @@ func (a *App) providerCommand() *cobra.Command {
 	add.Flags().StringSliceVar(&p.Targets, "target", nil, "目标 CLI，可重复或逗号分隔")
 	add.Flags().StringVar(&p.BaseURL, "base-url", "", "API 地址")
 	add.Flags().StringVar(&p.Model, "model", "", "模型")
+	add.Flags().StringVar(&p.SecretMode, "secret-mode", "callback", "密钥模式：callback、env_key 或 env_inline")
 	add.Flags().BoolVar(&keyStdin, "api-key-stdin", false, "从标准输入读取 API key")
 	_ = add.MarkFlagRequired("id")
 	_ = add.MarkFlagRequired("target")
@@ -121,33 +127,62 @@ func (a *App) providerCommand() *cobra.Command {
 			return e
 		}
 		for t := range a.Adapters {
-			ext := ".json"
+			paths := []string{filepath.Join(a.Home, "rendered", t, args[0]+".json")}
 			if t == "codex" {
-				ext = ".toml.fragment"
+				paths = []string{filepath.Join(a.Home, "rendered", t, args[0]+".toml.fragment"), filepath.Join(a.Home, "rendered", t, args[0]+".catalog.json")}
 			}
-			path := filepath.Join(a.Home, "rendered", t, args[0]+ext)
-			if e = os.Remove(path); e != nil && !os.IsNotExist(e) {
-				return e
+			for _, path := range paths {
+				for _, candidate := range []string{path, path + ".relay-cache.json"} {
+					if e = os.Remove(candidate); e != nil && !os.IsNotExist(e) {
+						return e
+					}
+				}
 			}
 		}
 		return nil
 	}}
-	parent.AddCommand(add, list, remove, a.importCommand(), a.renderCommand(false), a.renderCommand(true))
+	prune := &cobra.Command{Use: "prune --hard", Short: "物理删除已禁用的供应商", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if !hardPrune {
+			return fmt.Errorf("必须显式指定 --hard")
+		}
+		unlock, e := a.lock(cmd.Context())
+		if e != nil {
+			return e
+		}
+		defer unlock()
+		s, e := a.store(cmd, false)
+		if e != nil {
+			return e
+		}
+		defer s.Close()
+		count, e := s.HardPrune(cmd.Context())
+		if e != nil {
+			return e
+		}
+		return outputJSON(cmd, map[string]any{"removed": count})
+	}}
+	prune.Flags().BoolVar(&hardPrune, "hard", false, "物理删除全部 disabled 记录")
+	parent.AddCommand(add, list, remove, prune, a.importCommand(), a.renderCommand(false), a.renderCommand(true))
 	return parent
 }
 func (a *App) importCommand() *cobra.Command {
 	var source string
 	var dry bool
+	var onConflict string
+	var prune bool
 	cmd := &cobra.Command{Use: "import <file.sql>", Short: "从 cc-switch SQL 导入（不自动切换）", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if source != "cc-switch" {
 			return fmt.Errorf("仅支持 --from cc-switch")
+		}
+		if onConflict != "overwrite" && onConflict != "skip" {
+			return fmt.Errorf("--on-conflict 必须为 overwrite 或 skip")
 		}
 		result, e := ccswitch.Parse(cmd.Context(), args[0])
 		if e != nil {
 			return e
 		}
 		var store *provider.Store
-		ids := map[string]bool{}
+		existing := map[string]provider.Provider{}
 		if !dry {
 			unlock, e := a.lock(cmd.Context())
 			if e != nil {
@@ -172,28 +207,52 @@ func (a *App) importCommand() *cobra.Command {
 				return e
 			}
 			for _, p := range items {
-				ids[p.ID] = true
+				existing[p.ID] = p
 			}
 		}
 		entries := make([]provider.Entry, 0, len(result.Providers))
+		seen := make([]string, 0, len(result.Providers))
+		used := map[string]bool{}
+		for id := range existing {
+			used[id] = true
+		}
 		report := []map[string]any{}
 		for _, entry := range result.Providers {
 			p := entry.Provider
 			original := p.ID
-			for n := 1; ids[p.ID]; n++ {
-				base := original
-				if len(base) > 100 {
-					base = base[:100]
+			target := p.Targets[0]
+			match := ""
+			for id, old := range existing {
+				if old.Source == "cc-switch-import" && old.Supports(target) && provider.Slugify(old.DisplayName) == provider.Slugify(p.DisplayName) {
+					match = id
+					break
 				}
-				p.ID = fmt.Sprintf("%s-imported-%d", base, n)
 			}
-			ids[p.ID] = true
+			if match != "" {
+				p.ID = match
+			} else if used[p.ID] {
+				base := provider.Slugify(strings.Join([]string{p.DisplayName, target}, "-"))
+				p.ID = base
+				for n := 2; used[p.ID]; n++ {
+					p.ID = fmt.Sprintf("%s-%d", base, n)
+				}
+			}
+			used[p.ID] = true
+			for i := range entry.Models {
+				entry.Models[i].ProviderID = p.ID
+			}
+			seen = append(seen, p.ID)
 			row := map[string]any{"id": p.ID, "original_id": entry.OriginalID, "display_name": p.DisplayName, "targets": p.Targets, "was_current": entry.Current}
 			if len(entry.Warnings) > 0 {
 				row["warnings"] = entry.Warnings
 			}
 			if p.ID != original {
 				row["conflict_renamed"] = true
+			}
+			if old, exists := existing[p.ID]; exists && old.Source == "cc-switch-import" && onConflict == "skip" {
+				row["skipped"] = true
+				report = append(report, row)
+				continue
 			}
 			unsupported := []string{}
 			for _, t := range p.Targets {
@@ -208,26 +267,49 @@ func (a *App) importCommand() *cobra.Command {
 				row["suggestion"] = "relay switch " + p.ID
 			}
 			report = append(report, row)
-			entries = append(entries, provider.Entry{Provider: p, Secrets: entry.Secrets})
+			entries = append(entries, provider.Entry{Provider: p, Secrets: entry.Secrets, Models: entry.Models})
 		}
+		stale := []string{}
+		seenSet := map[string]bool{}
+		for _, id := range seen {
+			seenSet[id] = true
+		}
+		for id, old := range existing {
+			if old.Source == "cc-switch-import" && !seenSet[id] {
+				stale = append(stale, id)
+			}
+		}
+		sort.Strings(stale)
 		if !dry {
 			for _, entry := range entries {
 				for _, target := range entry.Provider.Targets {
 					if ad, ok := a.Adapters[target]; ok {
-						if _, e = ad.Render(entry.Provider, a.Home); e != nil {
+						if _, e = ad.Render(entry.Provider, a.Home, entry.Models...); e != nil {
 							return fmt.Errorf("渲染供应商 %s 失败: %w", entry.Provider.ID, e)
 						}
 					}
 				}
 			}
-			if e = store.Import(cmd.Context(), entries, result.FileHash, result.Snapshot); e != nil {
+			for _, entry := range entries {
+				if e = store.Upsert(cmd.Context(), entry); e != nil {
+					return e
+				}
+			}
+			if e = store.RecordImport(cmd.Context(), result.FileHash, result.Snapshot, seen); e != nil {
 				return e
 			}
+			if prune {
+				if _, e = store.SetDisabledExcept(cmd.Context(), seen); e != nil {
+					return e
+				}
+			}
 		}
-		return outputJSON(cmd, map[string]any{"dry_run": dry, "count": len(report), "providers": report})
+		return outputJSON(cmd, map[string]any{"dry_run": dry, "count": len(report), "providers": report, "stale_providers": stale})
 	}}
 	cmd.Flags().StringVar(&source, "from", "", "导入来源")
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "仅解析和报告，不写入本地存储")
+	cmd.Flags().StringVar(&onConflict, "on-conflict", "overwrite", "同名供应商处理：overwrite 或 skip")
+	cmd.Flags().BoolVar(&prune, "prune", false, "将导出中已不存在的 cc-switch 供应商标记为 disabled")
 	_ = cmd.MarkFlagRequired("from")
 	return cmd
 }
@@ -262,7 +344,14 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 		if !p.Supports(args[0]) {
 			return fmt.Errorf("供应商不支持指定 CLI")
 		}
-		artifact, e := ad.Render(p, a.Home)
+		if p.EffectiveStatus() == "disabled" {
+			return fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
+		}
+		models, e := s.Models(cmd.Context(), p.ID)
+		if e != nil {
+			return e
+		}
+		artifact, e := ad.Render(p, a.Home, models...)
 		if e != nil {
 			return e
 		}

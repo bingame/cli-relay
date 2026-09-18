@@ -12,7 +12,6 @@ import (
 
 	"github.com/bingame/cli-relay/internal/adapter"
 	"github.com/bingame/cli-relay/internal/provider"
-	"github.com/bingame/cli-relay/internal/safeio"
 )
 
 type Adapter struct{ Binary string }
@@ -22,12 +21,15 @@ var _ adapter.LaunchAdapter = (*Adapter)(nil)
 func New() *Adapter             { return &Adapter{Binary: "claude"} }
 func (*Adapter) Target() string { return "claude-code" }
 
-func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifact, error) {
+func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provider.Model) (adapter.Artifact, error) {
 	if err := p.Validate(); err != nil {
 		return adapter.Artifact{}, err
 	}
 	if !p.Supports(a.Target()) {
 		return adapter.Artifact{}, fmt.Errorf("供应商不支持 Claude Code")
+	}
+	if p.EffectiveSecretMode() != "callback" {
+		return adapter.Artifact{}, fmt.Errorf("Claude Code 当前仅支持 callback 密钥模式")
 	}
 	settings := map[string]any{}
 	if raw, ok := p.Extra["claude_settings"]; ok {
@@ -39,6 +41,7 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 			return adapter.Artifact{}, fmt.Errorf("claude_settings 必须是 JSON 对象")
 		}
 	}
+	delete(settings, "apiKeyHelper")
 	if err := validateSettings(settings); err != nil {
 		return adapter.Artifact{}, err
 	}
@@ -50,28 +53,42 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string) (adapter.Artifac
 		env["ANTHROPIC_BASE_URL"] = p.BaseURL
 	}
 	if p.Model != "" {
-		env["ANTHROPIC_MODEL"] = p.Model
 		settings["model"] = p.Model
 	}
+	delete(env, "ANTHROPIC_AUTH_TOKEN")
+	delete(env, "ANTHROPIC_API_KEY")
 	if len(env) > 0 {
 		settings["env"] = env
+	}
+	settings["apiKeyHelper"] = "relay secret get claude-code " + p.ID
+	if len(models) > 0 {
+		options := make([]map[string]any, 0, len(models))
+		for _, model := range models {
+			option := map[string]any{"value": model.ModelID}
+			if model.DisplayName != "" {
+				option["label"] = model.DisplayName
+			}
+			options = append(options, option)
+		}
+		settings["modelPicker"] = map[string]any{"options": options, "replaceBuiltInOptions": true}
 	}
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return adapter.Artifact{}, fmt.Errorf("无法编码 Claude Code 配置")
 	}
 	data = append(data, '\n')
+	sourceHash := provider.ContentHash(p, models)
 	path, err := filepath.Abs(filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".json"))
 	if err != nil {
 		return adapter.Artifact{}, fmt.Errorf("无法解析渲染路径: %w", err)
 	}
-	if err := safeio.WriteFile(path, data, 0600); err != nil {
+	if err := adapter.WriteRendered(path, data, sourceHash); err != nil {
 		return adapter.Artifact{}, err
 	}
 	if err := installHandoffPlugin(filepath.Join(filepath.Dir(path), "handoff-plugin")); err != nil {
 		return adapter.Artifact{}, err
 	}
-	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: data, Config: settings, EnvKey: "ANTHROPIC_AUTH_TOKEN"}, nil
+	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: data, Config: settings, SourceHash: sourceHash}, nil
 }
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -84,56 +101,19 @@ var providerEnv = []string{
 	"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
 }
 
-func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
-	settings, err := artifactSettings(artifact)
+func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, _ adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
+	_, err := artifactSettings(artifact)
 	if err != nil {
 		return adapter.LaunchInputs{}, err
 	}
 	if artifact.Path == "" {
 		return adapter.LaunchInputs{}, fmt.Errorf("Claude Code 渲染文件路径不能为空")
 	}
-	env := map[string]string{}
-	if values, ok := settings["env"].(map[string]any); ok {
-		for name, value := range values {
-			env[name] = value.(string)
-		}
-	}
-	if key := secrets["api_key"]; key != "" {
-		name := secrets["api_key_env"]
-		if name == "" {
-			name = "ANTHROPIC_AUTH_TOKEN"
-		}
-		if name != "ANTHROPIC_AUTH_TOKEN" && name != "ANTHROPIC_API_KEY" {
-			return adapter.LaunchInputs{}, fmt.Errorf("不支持的 Claude Code 鉴权环境名")
-		}
-		env[name] = key
-	}
-	for name, value := range secrets {
-		if !strings.HasPrefix(name, "env:") {
-			continue
-		}
-		name = strings.TrimPrefix(name, "env:")
-		if !envName.MatchString(name) || strings.ContainsRune(value, '\x00') || (name != "ANTHROPIC_CUSTOM_HEADERS" && strings.ContainsAny(value, "\r\n")) {
-			return adapter.LaunchInputs{}, fmt.Errorf("无效的凭据环境变量")
-		}
-		if old, exists := env[name]; exists && old != value {
-			return adapter.LaunchInputs{}, fmt.Errorf("凭据环境变量 %s 存在冲突", name)
-		}
-		env[name] = value
-	}
-	for name, value := range env {
-		if strings.ContainsRune(value, '\x00') || (name != "ANTHROPIC_CUSTOM_HEADERS" && strings.ContainsAny(value, "\r\n")) {
-			return adapter.LaunchInputs{}, fmt.Errorf("环境变量不能包含换行或 NUL")
-		}
-	}
-	if env["ANTHROPIC_AUTH_TOKEN"] != "" && env["ANTHROPIC_API_KEY"] != "" {
-		return adapter.LaunchInputs{}, fmt.Errorf("Claude Code 不能同时注入 AUTH_TOKEN 和 API_KEY")
-	}
 	binary := a.Binary
 	if binary == "" {
 		binary = "claude"
 	}
-	return adapter.LaunchInputs{Binary: binary, Args: []string{"--setting-sources", "", "--settings", artifact.Path, "--plugin-dir", filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")}, Env: env, UnsetEnv: append([]string(nil), providerEnv...)}, nil
+	return adapter.LaunchInputs{Binary: binary, Args: []string{"--settings", artifact.Path}, Env: map[string]string{}, UnsetEnv: append([]string(nil), providerEnv...)}, nil
 }
 
 func (*Adapter) NativeArgs(mode adapter.Mode, args []string) ([]string, error) {
@@ -232,6 +212,12 @@ func rejectCredentialFields(value any) error {
 	switch value := value.(type) {
 	case map[string]any:
 		for key, child := range value {
+			if key == "apiKeyHelper" {
+				if helper, ok := child.(string); !ok || !strings.HasPrefix(helper, "relay secret get claude-code ") {
+					return fmt.Errorf("Claude Code apiKeyHelper 必须由 Relay 管理")
+				}
+				continue
+			}
 			upper := strings.ToUpper(strings.ReplaceAll(key, "-", "_"))
 			for _, marker := range []string{"API_KEY", "APIKEY", "_TOKEN", "ACCESS_KEY", "SECRET", "PASSWORD", "PRIVATE_KEY", "AUTHORIZATION", "CUSTOM_HEADERS", "CREDENTIAL"} {
 				if strings.Contains(upper, marker) {

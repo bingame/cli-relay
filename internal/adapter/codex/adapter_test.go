@@ -44,8 +44,8 @@ func TestRenderAndLaunchWithoutGlobalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.Binary != "codex" || input.Env[artifact.EnvKey] != "fake-private-key" || input.Env["EXTRA_TOKEN"] != "fake-extra-key" || len(input.Env) != 2 {
-		t.Fatal("启动凭据未正确注入环境")
+	if input.Binary != "codex" || input.Env[artifact.EnvKey] != "" || input.Env["EXTRA_TOKEN"] != "fake-extra-key" || len(input.Env) != 1 {
+		t.Fatal("回调主凭据或附加环境处理错误")
 	}
 	if !reflect.DeepEqual(input.UnsetEnv, []string{artifact.EnvKey}) {
 		t.Fatal("未清理继承的旧凭据")
@@ -61,23 +61,19 @@ func TestRenderAndLaunchWithoutGlobalConfig(t *testing.T) {
 	}
 	config := decodeTOML(t, artifact.Content)
 	id, _ := names(artifact.ProviderID)
-	if config["model_provider"] != id || config["model"] != "test-model" || config["profiles"] != nil || config["shell_environment_policy"] != nil {
-		t.Fatal("原生配置指针或安全边界错误")
+	if artifact.Profile["model_provider"] != id || artifact.Profile["model"] != "test-model" || config["model_provider"] != nil || config["model"] != nil {
+		t.Fatal("provider 注册表与 profile 选择器未分离")
 	}
-	if len(input.Args)%2 != 0 {
-		t.Fatal("override 参数未配对")
+	if !reflect.DeepEqual(input.Args, []string{"--profile", id}) {
+		t.Fatal("未使用独立 profile")
 	}
-	for i := 0; i < len(input.Args); i += 2 {
-		if input.Args[i] != "-c" {
-			t.Fatal("缺少原生 config override")
-		}
-		parsed := decodeTOML(t, []byte(input.Args[i+1]))
-		if strings.HasPrefix(input.Args[i+1], "model_providers.") && parsed["model_providers"] == nil {
-			t.Fatal("未内联完整 provider 定义")
-		}
+	profile, err := os.ReadFile(filepath.Join(a.NativeHome, id+".config.toml"))
+	if err != nil || bytes.Contains(profile, []byte("model_providers")) {
+		t.Fatal("profile 不应重复供应商注册表")
 	}
-	if _, err := os.Stat(a.NativeHome); !os.IsNotExist(err) {
-		t.Fatal("临时启动修改了全局配置目录")
+	global, err := os.ReadFile(filepath.Join(a.NativeHome, "config.toml"))
+	if err != nil || !bytes.Contains(global, []byte("[model_providers."+id+"]")) {
+		t.Fatal("启动前未注册供应商")
 	}
 }
 
@@ -93,18 +89,18 @@ func TestNativeConfigMappingAndCredentialRejection(t *testing.T) {
 	config := decodeTOML(t, artifact.Content)
 	id, _ := names(p.ID)
 	def := config["model_providers"].(map[string]any)[id].(map[string]any)
-	if config["model"] != p.Model || config["model_reasoning_effort"] != "high" || def["base_url"] != p.BaseURL || def["env_key"] != artifact.EnvKey || def["request_max_retries"] != int64(3) {
+	if artifact.Profile["model"] != p.Model || artifact.Profile["model_reasoning_effort"] != "high" || def["base_url"] != p.BaseURL || def["auth"] == nil || def["request_max_retries"] != int64(3) {
 		t.Fatal("原生字段映射错误")
 	}
-	if config["approval_policy"] != nil || config["shell_environment_policy"] != nil {
+	if artifact.Profile["approval_policy"] != nil || config["shell_environment_policy"] != nil {
 		t.Fatal("供应商配置不应扩大执行权限")
 	}
 	input, err := a.BuildLaunchInputs(artifact, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i < len(input.Args); i += 2 {
-		decodeTOML(t, []byte(input.Args[i]))
+	if !reflect.DeepEqual(input.Args, []string{"--profile", id}) {
+		t.Fatal("未使用独立 profile")
 	}
 	for _, field := range []string{"api_key", "experimental_bearer_token", "http_headers", "auth", "OPENAI_API_KEY", "access_token", "clientSecret", "accessToken", "cookie"} {
 		t.Run(field, func(t *testing.T) {
@@ -147,7 +143,7 @@ func TestJSONStoredIntegerConfigRemainsNativeInteger(t *testing.T) {
 	config := decodeTOML(t, artifact.Content)
 	id, _ := names(p.ID)
 	definition := config["model_providers"].(map[string]any)[id].(map[string]any)
-	if config["model_context_window"] != int64(200000) || config["model_auto_compact_token_limit"] != int64(180000) || definition["request_max_retries"] != int64(3) || definition["stream_idle_timeout_ms"] != int64(120000) {
+	if artifact.Profile["model_context_window"] != int64(200000) || artifact.Profile["model_auto_compact_token_limit"] != int64(180000) || definition["request_max_retries"] != int64(3) || definition["stream_idle_timeout_ms"] != int64(120000) {
 		t.Fatal("JSON往返后配置整数退化成TOML浮点数")
 	}
 	for _, invalid := range []any{1.5, -1.0, "3", float64(1 << 54)} {
@@ -161,7 +157,7 @@ func TestJSONStoredIntegerConfigRemainsNativeInteger(t *testing.T) {
 func TestInvalidSecretEnvironment(t *testing.T) {
 	a := New()
 	artifact := renderTest(t, a, sampleProvider())
-	for _, secrets := range []adapter.ResolvedSecrets{{"env:BAD=NAME": "x"}, {"env:" + artifact.EnvKey: "x"}, {"api_key": "x\x00y"}, {"env:VALID": "x\x00y"}} {
+	for _, secrets := range []adapter.ResolvedSecrets{{"env:BAD=NAME": "x"}, {"env:" + artifact.EnvKey: "x"}, {"env:VALID": "x\x00y"}} {
 		if _, err := a.BuildLaunchInputs(artifact, secrets); err == nil {
 			t.Fatal("未拒绝非法环境变量")
 		}
@@ -222,12 +218,45 @@ func TestApplyGlobalPreservesUserConfigAndProfiles(t *testing.T) {
 	}
 }
 
-func TestProfileModeRequiresExplicitApply(t *testing.T) {
+func TestProfileModeInstallsWithoutChangingDefault(t *testing.T) {
 	a := New()
 	a.LaunchMode, a.NativeHome = "profile", t.TempDir()
 	artifact := renderTest(t, a, sampleProvider())
-	if _, err := a.BuildLaunchInputs(artifact, nil); err == nil {
-		t.Fatal("profile 模式必须先显式 switch")
+	if _, err := a.BuildLaunchInputs(artifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(a.NativeHome, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := decodeTOML(t, data)
+	if config["model_provider"] != nil || config["model"] != nil {
+		t.Fatal("临时启动修改了全局默认")
+	}
+}
+
+func TestProfileContainsOnlySelectorsAndCatalog(t *testing.T) {
+	a := New()
+	a.NativeHome = t.TempDir()
+	p := sampleProvider()
+	models := []provider.Model{{ProviderID: p.ID, ModelID: "test-model", DisplayName: "测试模型", IsDefault: true}}
+	artifact, err := a.Render(p, t.TempDir(), models...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.BuildLaunchInputs(artifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := os.ReadFile(filepath.Join(a.NativeHome, p.ID+".config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(profile, []byte("model_providers")) || !bytes.Contains(profile, []byte("model_catalog_json")) {
+		t.Fatal("profile 内容不符合 overlay 契约")
+	}
+	catalog, err := os.ReadFile(filepath.Join(filepath.Dir(artifact.Path), p.ID+".catalog.json"))
+	if err != nil || !bytes.Contains(catalog, []byte("test-model")) {
+		t.Fatal("模型目录未生成")
 	}
 }
 

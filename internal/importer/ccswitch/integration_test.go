@@ -78,7 +78,7 @@ func checkAdapterIntegration(t *testing.T, result *Result) int {
 				if err != nil || json.Unmarshal(stored, &p) != nil {
 					t.Fatal("无法模拟供应商数据库 JSON 往返")
 				}
-				artifact, err := ad.Render(p, root)
+				artifact, err := ad.Render(p, root, entry.Models...)
 				if err != nil {
 					t.Errorf("第 %d 条 %s 配置渲染失败（改名=%t）：%v", index+1, target, renamed, err)
 					continue
@@ -105,16 +105,9 @@ func checkAdapterIntegration(t *testing.T, result *Result) int {
 							t.Errorf("第 %d 条 %s 配置存在凭据输出泄漏（改名=%t）", index+1, target, renamed)
 						}
 					}
-					if strings.HasPrefix(key, "env:") && inputs.Env[strings.TrimPrefix(key, "env:")] != value {
-						t.Errorf("第 %d 条 %s 环境凭据引用失效（改名=%t）", index+1, target, renamed)
-					}
 				}
-				primaryEnv := artifact.EnvKey
-				if keyEnv := entry.Secrets["api_key_env"]; keyEnv != "" {
-					primaryEnv = keyEnv
-				}
-				if value := entry.Secrets["api_key"]; value != "" && inputs.Env[primaryEnv] != value {
-					t.Errorf("第 %d 条 %s 主凭据引用失效（改名=%t）", index+1, target, renamed)
+				if value := entry.Secrets["api_key"]; value != "" && strings.Contains(strings.Join(inputs.Args, "\n"), value) {
+					t.Errorf("第 %d 条 %s 主凭据进入 argv（改名=%t）", index+1, target, renamed)
 				}
 			}
 			checked++

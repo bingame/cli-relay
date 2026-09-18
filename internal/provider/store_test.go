@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,7 +20,7 @@ func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {
 	}
 	ctx := context.Background()
 	p := Provider{ID: "provider-a", DisplayName: "测试", Targets: []string{"codex"}, Source: "manual"}
-	if e = s.Import(ctx, []Entry{{p, map[string]string{"api_key": "dummy-secret-no-plaintext"}}}, "hash", []byte("mcp-dummy-token")); e != nil {
+	if e = s.Import(ctx, []Entry{{Provider: p, Secrets: map[string]string{"api_key": "dummy-secret-no-plaintext"}}}, "hash", []byte("mcp-dummy-token")); e != nil {
 		t.Fatal(e)
 	}
 	sec, e := s.Secrets(ctx, p.ID)
@@ -28,7 +29,7 @@ func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {
 	}
 	next := p
 	next.ID = "new"
-	if e = s.Import(ctx, []Entry{{next, nil}, {p, nil}}, "", nil); e == nil {
+	if e = s.Import(ctx, []Entry{{Provider: next}, {Provider: p}}, "", nil); e == nil {
 		t.Fatal("重复ID被覆盖")
 	}
 	items, e := s.List(ctx, "")
@@ -50,6 +51,32 @@ func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {
 	items, e = ro.List(ctx, "codex")
 	if e != nil || len(items) != 1 {
 		t.Fatal("只读读取失败", e)
+	}
+}
+
+func TestOpenMigratesLegacySchema(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "providers.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE providers (id TEXT PRIMARY KEY,display_name TEXT NOT NULL,targets TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT); CREATE TABLE import_log(id INTEGER PRIMARY KEY,source TEXT,file_hash TEXT,imported_at TEXT,raw_snapshot BLOB);`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Add(context.Background(), Provider{ID: "legacy", DisplayName: "旧供应商", Targets: []string{"codex"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	p, err := store.Get(context.Background(), "legacy")
+	if err != nil || p.EffectiveStatus() != "active" || p.EffectiveSecretMode() != "callback" {
+		t.Fatal("旧库迁移失败", err)
 	}
 }
 func TestProviderRejectsTraversalAndCredentialURLs(t *testing.T) {

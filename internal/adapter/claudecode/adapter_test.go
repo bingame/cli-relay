@@ -16,7 +16,7 @@ func fixtureProvider() provider.Provider {
 	return provider.Provider{ID: "fake-example", DisplayName: "虚构测试供应商", Targets: []string{"claude-code"}, BaseURL: "https://example.invalid/v1", Model: "fake-model", Extra: map[string]any{"claude_settings": map[string]any{"permissions": map[string]any{"allow": []string{"Read"}}, "env": map[string]any{"ANTHROPIC_DEFAULT_HAIKU_MODEL": "fake-small"}}}}
 }
 
-func TestRenderLaunchKeepsSecretsOnlyInEnvironment(t *testing.T) {
+func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
 	a := New()
 	p := fixtureProvider()
 	root := t.TempDir()
@@ -29,14 +29,15 @@ func TestRenderLaunchKeepsSecretsOnlyInEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if launch.Binary != "claude" || launch.Env["ANTHROPIC_AUTH_TOKEN"] != key || launch.Env["EXTRA_TEST_TOKEN"] != "fake-extra" {
-		t.Fatal("凭据未正确注入进程环境")
+	if launch.Binary != "claude" || len(launch.Env) != 0 {
+		t.Fatal("回调模式不应向进程环境注入凭据")
 	}
-	if launch.Env["ANTHROPIC_BASE_URL"] != p.BaseURL || launch.Env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "fake-small" {
-		t.Fatal("缺少供应商环境")
+	var settings map[string]any
+	if json.Unmarshal(artifact.Content, &settings) != nil || settings["apiKeyHelper"] != "relay secret get claude-code "+p.ID {
+		t.Fatal("未生成 apiKeyHelper")
 	}
 	pluginPath := filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")
-	if !reflect.DeepEqual(launch.Args, []string{"--setting-sources", "", "--settings", artifact.Path, "--plugin-dir", pluginPath}) {
+	if !reflect.DeepEqual(launch.Args, []string{"--settings", artifact.Path}) {
 		t.Fatalf("argv 不符合隔离契约: %q", launch.Args)
 	}
 	for _, relative := range []string{"SKILL.md", ".claude-plugin/plugin.json"} {
@@ -89,16 +90,15 @@ func TestRenderRejectsSecretFieldsAndInvalidPaths(t *testing.T) {
 	}
 }
 
-func TestBuildRejectsInvalidEnvironmentAndDualAuthentication(t *testing.T) {
+func TestBuildIgnoresResolvedSecretsInCallbackMode(t *testing.T) {
 	a := New()
 	artifact, err := a.Render(fixtureProvider(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secrets := range []adapter.ResolvedSecrets{{"api_key": "fake-a", "env:ANTHROPIC_API_KEY": "fake-b"}, {"api_key": "fake\nkey"}, {"env:INVALID=NAME": "fake"}} {
-		if _, err := a.BuildLaunchInputs(artifact, secrets); err == nil {
-			t.Fatal("应拒绝无效/冲突环境")
-		}
+	launch, err := a.BuildLaunchInputs(artifact, adapter.ResolvedSecrets{"api_key": "fake\nkey", "env:INVALID=NAME": "fake"})
+	if err != nil || len(launch.Env) != 0 {
+		t.Fatal("回调模式不应消费已解析密钥")
 	}
 }
 
