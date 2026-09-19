@@ -1,8 +1,8 @@
-# Relay 技术规格说明书 v0.5
+# Relay 技术规格说明书 v0.6
 
 > 一句话定位：Relay 是一个本地优先的命令行工具，负责「用哪个供应商/哪份配置启动哪个 AI Agent CLI」以及「一段会话如何在供应商/CLI 之间语义交接」，不重新实现任务队列/自动重试（那是 Multica 等编排器的职责），但提供干净的集成点供它们调用。
 
-> **v0.5 变更**：Codex 的 `$CODEX_HOME/<id>.config.toml` profile 文件与主配置文件 `~/.codex/config.toml` 的继承关系确认为分层覆盖（overlay），profile 文件不需要重复声明 `[model_providers.<id>]`，`render()` 简化为只写一份进主配置文件；§13 开放问题 1 标记为已解决。
+> **v0.6 变更（回应实现阶段发现的 spec/代码/README 三方不一致）**：① §6 明确"覆盖匹配"仅限 `source="cc-switch-import"` 的记录，`manual` 记录永远不参与匹配（此前只在"失效清理"一处写了这条原则，未延伸到匹配阶段，是本 spec 的疏漏，现予补齐；代码已实现的行为是对的，不需要改代码）；② 补充 ID 撞号生成规则（`slugify(display_name+"-"+target)` + 数字后缀 `-2/-3...`），废弃此前从未真正采用的占位写法 `-imported-N`（README 中提到的 `-imported-N` 属于文档错误，需在 README 侧单独修正，不是 spec 问题）；③ 补全导入报告的输出 schema，并明确 `conflict_renamed` 是撞号改名的统一信号，不要求区分撞号记录的来源或额外追踪其 ID。
 
 ---
 
@@ -313,9 +313,10 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 4. 对每一行，**按白名单只提取"用户级"字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走：
    - `app_type` → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
    - `settings_config`（JSON 字符串）反序列化，白名单字段：`base_url`/`api_key`（→ `provider_secrets`，立刻加密，不落中间文件）/默认 `model`/**模型目录相关字段（Codex 的 `model_catalog_json` 内容、Claude Code 的 `modelPicker.options`）→ 写入 `provider_models` 表**，不塞进 `extra_json`（见 §3.1 变更）。
-   - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）；本地是否已存在同一个 provider 由 `(target, slugify(display_name))` 判断，不用 cc-switch 的内部 `id`（那是 UUID，用户在 cc-switch 里删了重建同名 provider 时会变，但语义上仍是"同一个"）。命中即按 `--on-conflict` 参数处理：
+   - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配范围仅限本地 `source = "cc-switch-import"` 的记录**——`source = "manual"` 的记录永远不参与这次匹配，即使 `(target, slugify(display_name))` 完全相同也不会被当作"已存在"，导入器会把它当新记录处理（见下方 ID 生成规则）。这不是遗漏，是和第 6 步"manual 记录永远不受清理逻辑影响"同一条原则的延伸：cc-switch 触发的自动化流程不应该静默覆盖用户手工维护的配置，宁可多出一条肉眼可见、可自行合并的重复记录，也不要静默覆盖看不见的手工字段。命中已有的 `cc-switch-import` 记录后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
-     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目。
+     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。
+   - **未命中时的 ID 生成规则**：base 取 `slugify(display_name + "-" + target)`；若该 ID 已被任何记录占用（不分 source，纯粹是主键唯一性检查），从 `-2` 开始递增追加数字后缀直到不冲突（`-imported-N` 这类占位写法已废弃，不要采用）。发生撞号改名时，导入报告统一标记 `conflict_renamed: true`；这个信号已足够说明最终 ID 不是最初计算出的干净 slug，不要求区分撞号对象是 `manual` 还是 `cc-switch-import`，也不额外追踪被撞记录的 ID 或 Source。
 5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据；若这两张表里含凭据类内容需先加密再存（见 §10 安全要求第 4 条）。
 6. **失效清理**：把本次导出快照里出现的所有 provider 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
    - 默认：只在导入报告里列出这些记录，不做任何改动。
@@ -324,6 +325,34 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
    - **`source = "manual"` 的记录永远不受这套清理逻辑影响**，无论是否出现在 cc-switch 的导出快照里。
 7. `is_current` 为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**。
 8. `--dry-run`：只做到第 4 步的解析结果展示，不写入 `providers.db`。
+
+**导入报告字段（`--dry-run` 与正式导入都输出同一结构）**：
+
+顶层字段：
+
+| 字段 | 含义 |
+|---|---|
+| `dry_run` | 布尔，本次是否仅解析和报告而未写入本地存储 |
+| `count` | `providers` 中的报告条目数 |
+| `providers` | 本次导出快照中的 provider 报告数组，每条结构见下表 |
+| `stale_providers` | 本地存在、但本次导出快照未出现的 `cc-switch-import` provider id 数组；`manual` 记录不进入此数组 |
+
+`providers` 每条记录的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `id` | 最终写入/命中的 Relay provider id |
+| `original_id` | cc-switch 导出记录中的原始 provider id，仅用于报告和追溯，不作为 Relay 的匹配键 |
+| `display_name` | 来自 cc-switch 的供应商名称 |
+| `targets` | 映射后的 Relay target 数组 |
+| `was_current` | 布尔，该记录在 cc-switch 中是否为原激活项 |
+| `warnings` | 可选；解析时产生的非敏感警告数组，无警告时省略 |
+| `conflict_renamed` | 可选布尔；ID 生成阶段发生撞号重命名时为 `true`，不区分撞号对象的 Source，无撞号时省略 |
+| `skipped` | 可选布尔；`--on-conflict skip` 命中已有 `cc-switch-import` 记录时为 `true`，否则省略 |
+| `unsupported_targets` | 可选；当前没有 Adapter 的 target 数组，无不支持 target 时省略 |
+| `suggestion` | 可选；`was_current` 为真时给出显式 `relay switch <id>` 建议，导入过程本身不执行切换 |
+
+`--dry-run` 只需要产出这份报告，不需要额外的展示格式规范；正式导入时同样的报告作为命令输出返回，供人读或者被脚本消费均可。可选布尔字段沿用当前的稀疏输出方式：条件不成立时省略，而不是显式输出 `false`。
 
 ---
 

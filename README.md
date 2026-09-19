@@ -94,7 +94,7 @@ unset RELAY_INPUT_KEY
 | 命令 | 行为 |
 | --- | --- |
 | `provider add/list/remove` | 管理供应商；删除仍被 current 引用的供应商会报错 |
-| `provider import --from cc-switch <sql> [--dry-run]` | 内存执行受限 SQL dump、解析真实列、加密凭据和原始快照；冲突 ID 自动加 `-imported-N` |
+| `provider import --from cc-switch <sql> [--dry-run]` | 内存执行受限 SQL dump、解析真实列、加密凭据和原始快照；冲突 ID 按 `slugify(display_name-target)` + `-2`/`-3...` 数字后缀生成，手动配置的记录不参与覆盖匹配，若占用同一 ID 则导入记录追加数字后缀 |
 | `provider render-args <cli> <id>` | 输出原生参数 JSON 数组，不包含密钥 |
 | `provider render-env <cli> <id> [--format dotenv\|json]` | 输出启动环境；默认 `KEY=VALUE`，Multica 使用 JSON |
 | `switch <id> [--target <cli>]` | 合并原生非敏感配置并修改指定 target 的 current 指针 |

@@ -10,6 +10,7 @@ import (
 
 	"github.com/bingame/cli-relay/internal/adapter"
 	"github.com/bingame/cli-relay/internal/adapter/mock"
+	"github.com/bingame/cli-relay/internal/provider"
 )
 
 func command(t *testing.T, home, input string, args ...string) (string, error) {
@@ -106,6 +107,64 @@ func TestImportDryRunAndDefaultOverwrite(t *testing.T) {
 		t.Fatal("导入自动激活了供应商")
 	}
 }
+
+func TestImportManualCollisionUsesGenericRenameSignal(t *testing.T) {
+	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
+	root := t.TempDir()
+	if _, err := command(t, root, "", "provider", "add", "--id", "codex", "--name", "Codex 演示", "--target", "codex"); err != nil {
+		t.Fatal(err)
+	}
+
+	fixture := filepath.Join("..", "..", "testdata", "ccswitch", "sample.sql")
+	out, err := command(t, root, "", "provider", "import", "--from", "cc-switch", fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	if err = json.Unmarshal([]byte(out), &report); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range report.Providers {
+		if row["display_name"] != "Codex 演示" {
+			continue
+		}
+		found = true
+		expectedID := provider.Slugify("Codex 演示-codex")
+		if row["id"] != expectedID || row["conflict_renamed"] != true {
+			t.Fatalf("manual 撞号报告不符合约定: %#v", row)
+		}
+		if _, exists := row["shadowed_manual_id"]; exists {
+			t.Fatalf("报告不应追踪 manual 撞号来源: %#v", row)
+		}
+	}
+	if !found {
+		t.Fatal("导入报告缺少 Codex 演示记录")
+	}
+
+	listed, err := command(t, root, "", "provider", "list", "--target", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var providers []struct {
+		ID     string `json:"id"`
+		Source string `json:"source"`
+	}
+	if err = json.Unmarshal([]byte(listed), &providers); err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]string{}
+	for _, item := range providers {
+		sources[item.ID] = item.Source
+	}
+	expectedID := provider.Slugify("Codex 演示-codex")
+	if sources["codex"] != "manual" || sources[expectedID] != "cc-switch-import" {
+		t.Fatalf("manual 记录被覆盖或导入记录未按规则改名: %#v", sources)
+	}
+}
+
 func TestCLIUsesMockAdapterContract(t *testing.T) {
 	root := t.TempDir()
 	ad := &mock.Adapter{Name: "test", Inputs: adapter.LaunchInputs{Binary: "fake", Args: []string{"--native"}}}
