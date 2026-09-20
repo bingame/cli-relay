@@ -95,22 +95,25 @@ func Parse(ctx context.Context, path string) (*Result, error) {
 		return nil, errors.New("无法检查 SQL 导出事务状态")
 	}
 	result := &Result{FileHash: hex.EncodeToString(digest[:]), Providers: []Entry{}}
-	rows, err := tableRows(ctx, conn, "providers", true)
+	userVersion, err := databaseUserVersion(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
-	result.Columns = rows.Columns
-	for _, required := range []string{"id", "app_type", "name", "settings_config", "meta", "is_current"} {
-		found := false
-		for _, col := range rows.Columns {
-			found = found || col == required
-		}
-		if !found {
-			return nil, fmt.Errorf("providers 缺少必需列 %s；实际列：%s", required, safeColumns(rows.Columns))
-		}
+	providerTable, err := inspectTable(ctx, conn, "providers", true)
+	if err != nil {
+		return nil, err
 	}
+	providerMapping, err := resolveProviderColumns(providerTable, userVersion)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := readTableRows(ctx, conn, providerTable.Name, providerMapping.queryColumns())
+	if err != nil {
+		return nil, err
+	}
+	result.Columns = providerTable.columnNames()
 	for i, row := range rows.Rows {
-		entry, err := parseEntry(row)
+		entry, err := parseEntry(providerMapping.semanticRow(row))
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条供应商记录无效：%s", i+1, err)
 		}
@@ -146,8 +149,124 @@ type rawTable struct {
 	Rows    []map[string]any `json:"rows"`
 }
 
+type tableColumn struct {
+	Name         string
+	DeclaredType string
+	NotNull      bool
+	DefaultValue any
+	PrimaryKey   int
+}
+
+type tableSchema struct {
+	Name    string
+	Columns []tableColumn
+}
+
+func (s tableSchema) columnNames() []string {
+	names := make([]string, len(s.Columns))
+	for i, column := range s.Columns {
+		names[i] = column.Name
+	}
+	return names
+}
+
+func (s tableSchema) findColumn(name string) (string, bool) {
+	for _, column := range s.Columns {
+		// SQLite 标识符本身不区分大小写；始终保留现场 schema 返回的拼写用于查询。
+		if strings.EqualFold(column.Name, name) {
+			return column.Name, true
+		}
+	}
+	return "", false
+}
+
+type providerColumnMapping struct {
+	id       string
+	app      string
+	name     string
+	settings string
+	meta     string
+	current  string
+}
+
+// resolveProviderColumns 中的物理名称来自 2026-09-20 对 cc-switch
+// src-tauri/src/database/schema.rs 的核对。这里先用 PRAGMA 的现场结果解析，
+// 再确认当前受支持 schema 的语义字段；未来上游改名时必须重新核对源码并扩展映射，
+// 不能从 Relay 旧 spec 中猜一个名称继续读取。
+func resolveProviderColumns(schema tableSchema, userVersion int64) (providerColumnMapping, error) {
+	type requiredColumn struct {
+		physical string
+		semantic string
+		dest     *string
+	}
+	mapping := providerColumnMapping{}
+	required := []requiredColumn{
+		{physical: "id", semantic: "上游 provider ID", dest: &mapping.id},
+		{physical: "app_type", semantic: "所属应用类型", dest: &mapping.app},
+		{physical: "name", semantic: "显示名称", dest: &mapping.name},
+		{physical: "settings_config", semantic: "设置载荷", dest: &mapping.settings},
+		{physical: "is_current", semantic: "当前激活标记", dest: &mapping.current},
+	}
+	missing := make([]string, 0)
+	for _, field := range required {
+		column, ok := schema.findColumn(field.physical)
+		if !ok {
+			missing = append(missing, field.semantic)
+			continue
+		}
+		*field.dest = column
+	}
+	// meta 不是 Relay 建立 provider 所必需的语义字段；存在时仅作为加密源数据保存。
+	mapping.meta, _ = schema.findColumn("meta")
+	if len(missing) > 0 {
+		return providerColumnMapping{}, fmt.Errorf(
+			"providers 缺少必需语义字段：%s；user_version=%d；实际列：%s",
+			strings.Join(missing, "、"), userVersion, safeColumns(schema.columnNames()),
+		)
+	}
+	return mapping, nil
+}
+
+func (m providerColumnMapping) queryColumns() []string {
+	columns := []string{m.id, m.app, m.name, m.settings, m.current}
+	if m.meta != "" {
+		columns = append(columns, m.meta)
+	}
+	return columns
+}
+
+func (m providerColumnMapping) semanticRow(row map[string]any) map[string]any {
+	semantic := map[string]any{
+		"id":              row[m.id],
+		"app_type":        row[m.app],
+		"name":            row[m.name],
+		"settings_config": row[m.settings],
+		"is_current":      row[m.current],
+	}
+	if m.meta != "" {
+		semantic["meta"] = row[m.meta]
+	}
+	return semantic
+}
+
+func databaseUserVersion(ctx context.Context, conn *sql.Conn) (int64, error) {
+	var version int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return 0, errors.New("无法读取 SQL 导出的 schema 版本")
+	}
+	return version, nil
+}
+
 func tableRows(ctx context.Context, conn *sql.Conn, table string, required bool) (rawTable, error) {
-	result := rawTable{Columns: []string{}, Rows: []map[string]any{}}
+	schema, err := inspectTable(ctx, conn, table, required)
+	if err != nil || len(schema.Columns) == 0 {
+		return rawTable{Columns: []string{}, Rows: []map[string]any{}}, err
+	}
+	return readTableRows(ctx, conn, schema.Name, schema.columnNames())
+}
+
+func inspectTable(ctx context.Context, conn *sql.Conn, table string, required bool) (tableSchema, error) {
+	result := tableSchema{Name: table, Columns: []tableColumn{}}
 	var exists int
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?", table).Scan(&exists); err != nil {
 		return result, errors.New("无法读取 SQL 导出结构")
@@ -158,16 +277,42 @@ func tableRows(ctx context.Context, conn *sql.Conn, table string, required bool)
 		}
 		return result, nil
 	}
-	// table 仅来自本文件内的常量，绝不使用导出数据拼接标识符。
-	rows, err := conn.QueryContext(ctx, `SELECT * FROM "`+table+`"`)
+	// table 仅来自本文件内的常量；仍统一引用，避免把标识符当 SQL 文本。
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+quoteIdentifier(table)+")")
+	if err != nil {
+		return result, errors.New("无法探测 SQL 导出表结构")
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var column tableColumn
+		if err := rows.Scan(&cid, &column.Name, &column.DeclaredType, &notNull, &column.DefaultValue, &primaryKey); err != nil {
+			return result, errors.New("无法读取 SQL 导出列定义")
+		}
+		column.NotNull = notNull != 0
+		column.PrimaryKey = primaryKey
+		result.Columns = append(result.Columns, column)
+	}
+	if rows.Err() != nil {
+		return result, errors.New("SQL 导出表结构读取未完成")
+	}
+	if len(result.Columns) == 0 {
+		return result, errors.New("SQL 导出中的表没有可读取列")
+	}
+	return result, nil
+}
+
+func readTableRows(ctx context.Context, conn *sql.Conn, table string, columns []string) (rawTable, error) {
+	result := rawTable{Columns: append([]string(nil), columns...), Rows: []map[string]any{}}
+	query, err := explicitSelectQuery(table, columns)
+	if err != nil {
+		return result, err
+	}
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return result, errors.New("无法读取 SQL 导出数据")
 	}
 	defer rows.Close()
-	result.Columns, err = rows.Columns()
-	if err != nil {
-		return result, errors.New("无法读取 SQL 导出列名")
-	}
 	for rows.Next() {
 		if len(result.Rows) >= 100000 {
 			return result, errors.New("SQL 导出单表行数超过 100000 条限制")
@@ -192,17 +337,32 @@ func tableRows(ctx context.Context, conn *sql.Conn, table string, required bool)
 	return result, nil
 }
 
+func explicitSelectQuery(table string, columns []string) (string, error) {
+	if len(columns) == 0 {
+		return "", errors.New("SQL 导出中的表没有可读取列")
+	}
+	quotedColumns := make([]string, len(columns))
+	for i, column := range columns {
+		quotedColumns[i] = quoteIdentifier(column)
+	}
+	return "SELECT " + strings.Join(quotedColumns, ", ") + " FROM " + quoteIdentifier(table), nil
+}
+
+func quoteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
 func parseEntry(row map[string]any) (Entry, error) {
 	id, idOK := textValue(row["id"])
 	app, appOK := textValue(row["app_type"])
 	name, nameOK := textValue(row["name"])
 	raw, rawOK := textValue(row["settings_config"])
 	if !idOK || id == "" || !appOK || !provider.ValidID(app) || !nameOK || strings.TrimSpace(name) == "" || !rawOK {
-		return Entry{}, errors.New("id、app_type、name 或 settings_config 字段无效")
+		return Entry{}, errors.New("上游 ID、所属应用类型、显示名称或设置载荷字段无效")
 	}
 	settings := map[string]any{}
 	if err := json.Unmarshal([]byte(raw), &settings); err != nil || settings == nil {
-		return Entry{}, errors.New("settings_config 不是 JSON 对象")
+		return Entry{}, errors.New("设置载荷不是 JSON 对象")
 	}
 	current, err := currentValue(row["is_current"])
 	if err != nil {
@@ -400,7 +560,7 @@ func currentValue(value any) (bool, error) {
 			return parsed, nil
 		}
 	}
-	return false, errors.New("is_current 不是有效布尔值")
+	return false, errors.New("当前激活字段不是有效布尔值")
 }
 
 func safeSlug(id string) string {

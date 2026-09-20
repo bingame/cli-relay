@@ -148,10 +148,58 @@ func TestParseRejectsDamagedAndIncompleteDumps(t *testing.T) {
 
 func TestMissingColumnReportsActualNames(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "import.sql")
-	writeFile(t, path, exportHeader+"\nCREATE TABLE providers (id TEXT, future_column TEXT);")
+	writeFile(t, path, exportHeader+"\nPRAGMA user_version=77; CREATE TABLE providers (id TEXT, future_column TEXT);")
 	_, err := Parse(context.Background(), path)
-	if err == nil || !strings.Contains(err.Error(), "future_column") || !strings.Contains(err.Error(), "app_type") {
+	if err == nil || !strings.Contains(err.Error(), "future_column") || !strings.Contains(err.Error(), "所属应用类型") || !strings.Contains(err.Error(), "user_version=77") {
 		t.Fatal("missing-column diagnostic does not report schema")
+	}
+}
+
+func TestParseBuildsProviderQueryFromPragmaSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "import.sql")
+	writeFile(t, path, exportHeader+`
+PRAGMA user_version=23;
+CREATE TABLE providers (
+    future_column TEXT,
+    is_current INTEGER NOT NULL DEFAULT 0,
+    settings_config TEXT NOT NULL,
+    name TEXT NOT NULL,
+    app_type TEXT NOT NULL,
+    id TEXT NOT NULL
+);
+INSERT INTO providers (id, app_type, name, settings_config, is_current, future_column)
+VALUES ('source-id', 'claude', '现场 Schema', '{"env":{"ANTHROPIC_MODEL":"claude-schema"}}', 1, 'ignored');
+`)
+	result, err := Parse(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Providers) != 1 {
+		t.Fatalf("expected one provider, got %d", len(result.Providers))
+	}
+	entry := result.Providers[0]
+	if entry.OriginalID != "source-id" || entry.Provider.DisplayName != "现场 Schema" || entry.Provider.Model != "claude-schema" || !entry.Current {
+		t.Fatal("provider semantic mapping did not follow the probed schema")
+	}
+	wantColumns := []string{"future_column", "is_current", "settings_config", "name", "app_type", "id"}
+	if strings.Join(result.Columns, ",") != strings.Join(wantColumns, ",") {
+		t.Fatalf("schema column order was not preserved: %v", result.Columns)
+	}
+	if _, exists := entry.Secrets["source_meta"]; exists {
+		t.Fatal("optional metadata was fabricated when the probed schema did not contain it")
+	}
+}
+
+func TestExplicitSelectQueryNeverUsesWildcardOrUnquotedIdentifiers(t *testing.T) {
+	query, err := explicitSelectQuery("providers", []string{"id", `future"column`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query != `SELECT "id", "future""column" FROM "providers"` || strings.Contains(query, "*") {
+		t.Fatalf("unexpected explicit-column query: %s", query)
+	}
+	if _, err := explicitSelectQuery("providers", nil); err == nil {
+		t.Fatal("empty explicit-column query was accepted")
 	}
 }
 

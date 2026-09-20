@@ -231,6 +231,8 @@ func (a *App) importCommand() *cobra.Command {
 			if match != "" {
 				p.ID = match
 			} else if used[p.ID] {
+				// spec §6：显示名 slug 被任何记录占用时，base 回退为
+				// slugify(display_name + "-" + target)，仍占用则从 -2 递增数字后缀。
 				base := provider.Slugify(strings.Join([]string{p.DisplayName, target}, "-"))
 				p.ID = base
 				for n := 2; used[p.ID]; n++ {

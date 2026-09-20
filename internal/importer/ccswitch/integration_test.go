@@ -23,9 +23,21 @@ func TestRealDumpAdapterIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 真实 dump 是用户数据，供应商数量会随上游增删变化；期望值从 dump 现场推导。
+	expected := 0
+	for _, entry := range result.Providers {
+		for _, target := range entry.Provider.Targets {
+			if target == "claude-code" || target == "codex" {
+				expected++
+			}
+		}
+	}
+	if expected == 0 {
+		t.Skip("该导出中没有受支持的 claude-code/codex 供应商")
+	}
 	checked := checkAdapterIntegration(t, result)
-	if checked != 15 {
-		t.Fatalf("期望验证 15 条受支持供应商，实际 %d", checked)
+	if checked != expected {
+		t.Fatalf("期望验证 %d 条受支持供应商，实际 %d", expected, checked)
 	}
 	t.Logf("已验证 %d 条供应商及其冲突改名版本：产物、argv 无明文已提取凭据", checked)
 }

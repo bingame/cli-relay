@@ -1,6 +1,8 @@
-# Relay 技术规格说明书 v0.6
+# Relay 技术规格说明书 v0.7
 
 > 一句话定位：Relay 是一个本地优先的命令行工具，负责「用哪个供应商/哪份配置启动哪个 AI Agent CLI」以及「一段会话如何在供应商/CLI 之间语义交接」，不重新实现任务队列/自动重试（那是 Multica 等编排器的职责），但提供干净的集成点供它们调用。
+
+> **v0.7 变更（合并在线讨论稿，并以 cc-switch 当前源码复核）**：§6 不再把本 spec 中出现过的 `providers` 列名当成上游契约。实现导入器时，必须直接对照所支持 cc-switch 版本的 `src-tauri/src/database/schema.rs`（必要时连同迁移/导出代码），或者在重建出的临时数据库上执行 `PRAGMA table_info(providers)` 现场探测；查询和字段映射由探测结果生成。早期草稿中的列名、列顺序和示例 `SELECT` 均不得作为实现依据。
 
 > **v0.6 变更（回应实现阶段发现的 spec/代码/README 三方不一致）**：① §6 明确"覆盖匹配"仅限 `source="cc-switch-import"` 的记录，`manual` 记录永远不参与匹配（此前只在"失效清理"一处写了这条原则，未延伸到匹配阶段，是本 spec 的疏漏，现予补齐；代码已实现的行为是对的，不需要改代码）；② 补充 ID 撞号生成规则（`slugify(display_name+"-"+target)` + 数字后缀 `-2/-3...`），废弃此前从未真正采用的占位写法 `-imported-N`（README 中提到的 `-imported-N` 属于文档错误，需在 README 侧单独修正，不是 spec 问题）；③ 补全导入报告的输出 schema，并明确 `conflict_renamed` 是撞号改名的统一信号，不要求区分撞号记录的来源或额外追踪其 ID。
 
@@ -309,10 +311,14 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 **实现步骤（严格按此顺序，不要用正则解析 INSERT 语句代替第 2/3 步）**：
 1. 读取文件前 N 字节，校验是否包含 `CC_SWITCH_SQL_EXPORT_HEADER` 标记；不匹配则报错拒绝导入（防止误吃到无关 .sql 文件）。
 2. 在内存 SQLite（或临时文件 SQLite）中执行整份脚本，重建出临时数据库。
-3. 执行 `SELECT id, app_type, name, settings_config, meta, is_current FROM providers;`（列名以实际 schema 为准，若与本 spec 假设不符，以运行时探测到的列为准，不要硬编码假设失败即报错并打印实际列名供人工确认）。
-4. 对每一行，**按白名单只提取"用户级"字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走：
-   - `app_type` → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
-   - `settings_config`（JSON 字符串）反序列化，白名单字段：`base_url`/`api_key`（→ `provider_secrets`，立刻加密，不落中间文件）/默认 `model`/**模型目录相关字段（Codex 的 `model_catalog_json` 内容、Claude Code 的 `modelPicker.options`）→ 写入 `provider_models` 表**，不塞进 `extra_json`（见 §3.1 变更）。
+3. **先确认现场 schema，再构造查询；本 spec 不固化 cc-switch 的列定义。** 实现阶段必须采用以下任一事实来源，并以事实来源为准建立“上游字段 → Relay 语义字段”的映射：
+   - 直接对照所支持 cc-switch 版本的源码，至少检查 `src-tauri/src/database/schema.rs`；若该版本存在迁移或导出层改写，还要同时检查对应的 migration/backup 实现。
+   - 在第 2 步重建出的临时数据库上执行 `PRAGMA table_info(providers)`，按返回的列名、类型、默认值和主键信息现场探测。SQL dump 自带建表语句时，优先以这个临时库的实际结果兼容不同导出版本。
+
+   不得复制或猜测本 spec 早期草稿里出现过的任何 `providers` 列名和列顺序，也不得把曾经出现过的示例 `SELECT` 当作兼容性承诺。查询必须使用显式列名，并由已确认的 schema 映射构造，禁止 `SELECT *` 后按位置取值。若找不到导入所需的语义字段，应安全失败，并在不泄露字段值的前提下报告 schema 版本（若有）和探测到的列名，供人工确认。
+4. 对每一行，**按白名单只提取"用户级"语义字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走。以下描述的是要提取的**语义**，不是对 cc-switch 物理列名或 JSON 键名的固定声明；实际取值路径必须来自第 3 步的源码核对或现场探测：
+   - provider 所属应用类型 → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
+   - provider 的设置载荷 → 按其实际格式反序列化，再提取基础 URL、API 密钥（→ `provider_secrets`，立刻加密，不落中间文件）、默认模型和模型目录等白名单语义；模型目录写入 `provider_models` 表，不塞进 `extra_json`（见 §3.1 变更）。载荷内部键名同样以所支持 cc-switch 版本的实际源码/数据为准，不沿用早期草稿中的名称猜测。
    - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配范围仅限本地 `source = "cc-switch-import"` 的记录**——`source = "manual"` 的记录永远不参与这次匹配，即使 `(target, slugify(display_name))` 完全相同也不会被当作"已存在"，导入器会把它当新记录处理（见下方 ID 生成规则）。这不是遗漏，是和第 6 步"manual 记录永远不受清理逻辑影响"同一条原则的延伸：cc-switch 触发的自动化流程不应该静默覆盖用户手工维护的配置，宁可多出一条肉眼可见、可自行合并的重复记录，也不要静默覆盖看不见的手工字段。命中已有的 `cc-switch-import` 记录后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
      - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。
@@ -323,7 +329,7 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
    - `--prune`：把它们的 `status` 置为 `disabled`（软删除，数据保留）；`switch`/`run` 引用到 `disabled` 的 provider 时报错并提示"已被 cc-switch 同步标记为失效"，而不是静默找不到。
    - 物理删除是单独的命令 `relay provider prune --hard`，只清理已经 `disabled` 的记录，不作为 import 流程的自动副作用。
    - **`source = "manual"` 的记录永远不受这套清理逻辑影响**，无论是否出现在 cc-switch 的导出快照里。
-7. `is_current` 为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**。
+7. 上游“当前激活”语义字段为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**；其物理列名仍按第 3 步确认，不在本 spec 中固定。
 8. `--dry-run`：只做到第 4 步的解析结果展示，不写入 `providers.db`。
 
 **导入报告字段（`--dry-run` 与正式导入都输出同一结构）**：
@@ -507,7 +513,7 @@ multica agent create --name my-agent --runtime-id codex \
 ## 13. 开放问题（实现前需要确认或探测，不要假设）
 1. **（已解决）** Codex 的 `--profile <name>` 已确认对应 `$CODEX_HOME/<name>.config.toml` 独立文件，`[profiles.<name>]` 小节与此无关。继承关系也已确认为分层覆盖（先加载主配置、再加载 profile 文件、同名字段覆盖），profile 文件不需要重复声明主配置里已有的 `[model_providers.<id>]`。这条信息来自 Codex 官方助手的回答而非静态文档页面，建议实现后跑一次真实的 `--profile` 冒烟测试做二次确认，但不必再假设需要冗余写入。
 2. Codex `shell_environment_policy` 的 allowlist 具体配置语法（仅 `env_key` 降级路径需要，默认的 `auth.command` 路径不涉及子进程环境变量继承问题，优先级降低但仍需在降级路径的测试里覆盖）。
-3. cc-switch `providers` 表的完整列定义（本 spec 依据的是间接来源，导入器实现时应先做一次 `SELECT * FROM providers LIMIT 1` 打印实际列名核对，再固化字段映射，不要硬编码列顺序）。
+3. **（已解决：确认方法，而非冻结 schema）** cc-switch `providers` 表的完整列定义不由本 spec 转录维护。导入器实现时必须直接对照目标版本的 `src-tauri/src/database/schema.rs`（必要时连同 migration/backup 代码），或对第 2 步得到的临时库执行 `PRAGMA table_info(providers)`；不得采用早期草稿列名、不得硬编码列顺序，也不得用 `SELECT *` 的位置结果建立映射。实现完成后应保留一项基于临时库探测的兼容性测试，证明列顺序变化不会导致错读。
 4. Claude Code settings 文件的「Relay 管理区块」如何与用户手工编辑的其余内容共存而不冲突，建议用注释标记 + 首次写入前询问用户确认覆盖范围。
 5. 是否需要支持 `cursor-agent` 作为 P0/P1 范围内的第三个 Adapter，还是留到后续版本——取决于用户自己的实际使用频率。
 6. `relay secret get` 作为 Codex/Claude Code 的回调命令被调用时，需要确认两边各自的调用环境（工作目录、能否找到 `relay` 在 `PATH` 里、跑在什么 shell 下）是否会影响 keychain 解密所需的权限上下文（例如 macOS Keychain 有时对"哪个可执行文件在请求"有访问控制），实现前用真实的 `apiKeyHelper`/`auth.command` 触发路径测一遍，不要只测「手动在终端跑 `relay secret get`」这种和真实调用环境不同的场景。

@@ -1,6 +1,14 @@
 # 实现与验收记录
 
-日期：2026-09-17。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+日期：2026-09-17；最近更新：2026-09-20。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+
+## 2026-09-20：Spec v0.7 增量
+
+- 对照 cc-switch 源码提交 `06082e189d65e6d6dbadc35dacdac1ce6c79d89a` 的 `src-tauri/src/database/schema.rs`、`database/backup.rs`，确认 SQL 导出包含现场 schema，且导出器本身通过 `PRAGMA table_info` 取得实际列。
+- cc-switch 导入器改为先对临时库执行 `PRAGMA table_info(providers)`，保留列名、声明类型、非空、默认值和主键信息，再建立当前源码确认的语义映射；读取数据时根据映射生成显式列查询，不再使用 `SELECT *` 或依赖列顺序。
+- 缺少必需语义字段时安全失败，诊断只包含语义字段名、`user_version` 和实际列名，不包含配置值。未知列继续兼容，`meta` 缺失时不再阻断导入。
+- 新增现场 schema 列重排、未知列、可选 `meta`、显式查询引用和缺失字段诊断测试。
+- 验收命令：`go test ./...`、`go vet ./...`、`go test ./internal/importer/ccswitch -count=10`、`git diff --check`，退出码均为 0；额外源码检查确认 `internal/importer/ccswitch` 中没有 `SELECT *`。
 
 ## 安装与分发补充
 
@@ -30,6 +38,7 @@ GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平
 
 - Windows：`go test ./...`、`go vet ./...`。
 - 真实 SQL 完整 CLI 验证：18 条供应商、15 条支持的 target 渲染，61 条加密秘密数据、1 份加密 MCP/prompts 快照；dry-run 无写入，导入不自动 switch，输出及落盘文件未发现已识别凭据明文。
+- 2026-09-20 用用户 2026-09-19 生成的新导出（14 条供应商、18 列）复验：`TestParseRealDumpStatistics`、`TestRealDumpAdapterIntegration`（期望值改为从 dump 现场推导，不再硬编码上次的 15）；CLI 端到端（隔离 RELAY_HOME）覆盖 dry-run 报告 schema、manual 同名不参与匹配、撞号改名、`--on-conflict skip`、空导出 `--prune` 后 disabled 记录 `switch` 报"已被 cc-switch 同步标记为失效"、manual 记录不受清理影响；数据目录扫描未发现明文凭据。
 - 适配器真实 Codex + 127.0.0.1 假 SSE：override、独立 profile、switch 后默认配置三种路径。
 - `scripts/verify_codex_relay.py`：真实 Relay CLI 的 exec 退出 0，鉴权/模型正确，会话记录成功；二进制别名完成 initialize、thread/start、turn/start、thread/read，及时转发 JSONL，退出 0。
 - WSL Ubuntu 20.04：实际执行 Linux process 和 cli 测试，包括 `syscall.Exec` 后 PID 不变、原生退出码保持、取消清理、超长行、脱敏、供应商切换隔离、dry-run、Handoff 降级及硬约束注入。
