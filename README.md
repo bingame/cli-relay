@@ -79,6 +79,22 @@ go build -trimpath -o bin/relay.exe ./cmd/relay
 Linux/macOS：`CGO_ENABLED=0 go build -trimpath -o bin/relay ./cmd/relay`。
 生成的 Relay 二进制没有 Go、Node、Python 或 SQLite 运行时依赖。`scripts/` 中的验证脚本仅供开发使用。
 
+### 改完代码后更新本机安装
+
+`install.ps1` / `install.sh` 下载的是 Release 产物，不含本地改动。要把当前工作区代码装到本机，用仓库内的脚本：它构建当前代码、原子替换已安装的二进制、重装内嵌 Skill，并保留旧二进制为 `relay.exe.bak` / `relay.bak` 以便回滚。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-local.ps1
+powershell -ExecutionPolicy Bypass -File scripts/install-local.ps1 -Test       # 先跑 go test ./...
+powershell -ExecutionPolicy Bypass -File scripts/install-local.ps1 -SkipSkill  # 未改 skills/ 时可跳过
+```
+
+```sh
+sh scripts/install-local.sh [--test] [--skip-skill] [--no-backup] [--install-dir DIR]
+```
+
+安装目录与 `install.ps1` / `install.sh` 一致：Windows 为 `%LOCALAPPDATA%\Relay\bin`，Unix 为 `~/.local/bin`，可用 `-InstallDir` / `--install-dir` 或 `RELAY_INSTALL_DIR` 覆盖。`--version` 显示 `v0.0.0-local+<短 SHA>`，工作区有未提交改动时追加 `.dirty`；正式 tag 只由 GoReleaser 注入。运行中的 relay 会占用 exe，脚本检测到进程时会直接报错并要求先退出。
+
 手动添加支持重复 `--target`。API key 从 stdin 输入，不能放入 argv：
 
 ```sh
