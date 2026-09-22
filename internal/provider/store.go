@@ -69,26 +69,13 @@ func Open(root string, cipher Cipher) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	_, e = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
- CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY,display_name TEXT NOT NULL,targets TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT,secret_mode TEXT NOT NULL DEFAULT 'callback',status TEXT NOT NULL DEFAULT 'active',content_hash TEXT);
- CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT NOT NULL,display_name TEXT,context_window INTEGER,reasoning_levels TEXT,default_reasoning_level TEXT,is_default INTEGER NOT NULL DEFAULT 0,sort_order INTEGER,PRIMARY KEY(provider_id,model_id));
- CREATE TABLE IF NOT EXISTS provider_secrets(provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,key_name TEXT NOT NULL,ciphertext BLOB NOT NULL,PRIMARY KEY(provider_id,key_name));
+ CREATE TABLE IF NOT EXISTS providers (target TEXT NOT NULL,id TEXT NOT NULL,display_name TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT,secret_mode TEXT NOT NULL DEFAULT 'callback',status TEXT NOT NULL DEFAULT 'active',content_hash TEXT,PRIMARY KEY(target,id),UNIQUE(target,display_name));
+ CREATE TABLE IF NOT EXISTS provider_models(target TEXT NOT NULL,provider_id TEXT NOT NULL,model_id TEXT NOT NULL,display_name TEXT,context_window INTEGER,reasoning_levels TEXT,default_reasoning_level TEXT,is_default INTEGER NOT NULL DEFAULT 0,sort_order INTEGER,PRIMARY KEY(target,provider_id,model_id),FOREIGN KEY(target,provider_id) REFERENCES providers(target,id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS provider_secrets(target TEXT NOT NULL,provider_id TEXT NOT NULL,key_name TEXT NOT NULL,ciphertext BLOB NOT NULL,PRIMARY KEY(target,provider_id,key_name),FOREIGN KEY(target,provider_id) REFERENCES providers(target,id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS import_log(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,file_hash TEXT,imported_at TEXT,raw_snapshot BLOB,seen_provider_ids TEXT);`)
 	if e != nil {
 		db.Close()
 		return nil, e
-	}
-	for _, migration := range []string{
-		`ALTER TABLE providers ADD COLUMN secret_mode TEXT NOT NULL DEFAULT 'callback'`,
-		`ALTER TABLE providers ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
-		`ALTER TABLE providers ADD COLUMN content_hash TEXT`,
-		`ALTER TABLE import_log ADD COLUMN seen_provider_ids TEXT`,
-		`ALTER TABLE provider_models ADD COLUMN reasoning_levels TEXT`,
-		`ALTER TABLE provider_models ADD COLUMN default_reasoning_level TEXT`,
-	} {
-		if _, err := db.Exec(migration); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
-			db.Close()
-			return nil, err
-		}
 	}
 	return &Store{db: db, cipher: cipher}, nil
 }
@@ -124,14 +111,13 @@ func (s *Store) Import(ctx context.Context, entries []Entry, hash string, snapsh
 			p.CreatedAt = now
 		}
 		p.UpdatedAt = now
-		targets, _ := json.Marshal(p.Targets)
 		extra, e := json.Marshal(p.Extra)
 		if e != nil {
 			return e
 		}
-		_, e = tx.ExecContext(ctx, `INSERT INTO providers(id,display_name,targets,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.ID, p.DisplayName, string(targets), p.BaseURL, p.Model, string(extra), p.Source, p.CreatedAt, p.UpdatedAt, p.SecretMode, p.Status, p.ContentHash)
+		_, e = tx.ExecContext(ctx, `INSERT INTO providers(target,id,display_name,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.Target, p.ID, p.DisplayName, p.BaseURL, p.Model, string(extra), p.Source, p.CreatedAt, p.UpdatedAt, p.SecretMode, p.Status, p.ContentHash)
 		if e != nil {
-			return fmt.Errorf("无法保存供应商 %s（ID 可能重复）", p.ID)
+			return fmt.Errorf("无法保存供应商 %s", p.ID)
 		}
 		for _, model := range entry.Models {
 			if model.ProviderID == "" {
@@ -140,12 +126,12 @@ func (s *Store) Import(ctx context.Context, entries []Entry, hash string, snapsh
 			if model.ProviderID != p.ID || strings.TrimSpace(model.ModelID) == "" {
 				return fmt.Errorf("供应商 %s 的模型目录无效", p.ID)
 			}
-			if e = insertModel(ctx, tx, model); e != nil {
+			if e = insertModel(ctx, tx, p.Target, model); e != nil {
 				return fmt.Errorf("保存模型目录失败")
 			}
 		}
 		for k, v := range entry.Secrets {
-			_, e = tx.ExecContext(ctx, `INSERT INTO provider_secrets VALUES(?,?,?)`, p.ID, k, s.cipher.Seal([]byte(v), p.ID+":"+k))
+			_, e = tx.ExecContext(ctx, `INSERT INTO provider_secrets(target,provider_id,key_name,ciphertext) VALUES(?,?,?,?)`, p.Target, p.ID, k, s.cipher.Seal([]byte(v), p.Target+":"+p.ID+":"+k))
 			if e != nil {
 				return fmt.Errorf("保存加密凭据失败")
 			}
@@ -163,7 +149,14 @@ func (s *Store) Import(ctx context.Context, entries []Entry, hash string, snapsh
 	return tx.Commit()
 }
 func (s *Store) List(ctx context.Context, target string) ([]Provider, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT id,display_name,targets,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash FROM providers ORDER BY id`)
+	query := `SELECT target,id,display_name,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash FROM providers`
+	args := []any{}
+	if target != "" {
+		query += ` WHERE target=?`
+		args = append(args, target)
+	}
+	query += ` ORDER BY target,id`
+	rows, e := s.db.QueryContext(ctx, query, args...)
 	if e != nil {
 		return nil, e
 	}
@@ -171,26 +164,24 @@ func (s *Store) List(ctx context.Context, target string) ([]Provider, error) {
 	result := []Provider{}
 	for rows.Next() {
 		var p Provider
-		var targets, extra string
+		var extra string
 		var contentHash sql.NullString
-		if e = rows.Scan(&p.ID, &p.DisplayName, &targets, &p.BaseURL, &p.Model, &extra, &p.Source, &p.CreatedAt, &p.UpdatedAt, &p.SecretMode, &p.Status, &contentHash); e != nil {
+		if e = rows.Scan(&p.Target, &p.ID, &p.DisplayName, &p.BaseURL, &p.Model, &extra, &p.Source, &p.CreatedAt, &p.UpdatedAt, &p.SecretMode, &p.Status, &contentHash); e != nil {
 			return nil, e
 		}
 		if contentHash.Valid {
 			p.ContentHash = contentHash.String
 		}
-		if json.Unmarshal([]byte(targets), &p.Targets) != nil || json.Unmarshal([]byte(extra), &p.Extra) != nil {
+		if json.Unmarshal([]byte(extra), &p.Extra) != nil {
 			return nil, fmt.Errorf("供应商数据损坏")
 		}
-		if target == "" || p.Supports(target) {
-			result = append(result, p)
-		}
+		result = append(result, p)
 	}
 	return result, rows.Err()
 }
 
-func (s *Store) Models(ctx context.Context, id string) ([]Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order FROM provider_models WHERE provider_id=? ORDER BY sort_order,model_id`, id)
+func (s *Store) Models(ctx context.Context, target, id string) ([]Model, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order FROM provider_models WHERE target=? AND provider_id=? ORDER BY sort_order,model_id`, target, id)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +204,7 @@ func (s *Store) Models(ctx context.Context, id string) ([]Model, error) {
 
 // insertModel 是模型目录唯一的写入路径：列名显式列出，避免新增列后
 // 位置式 INSERT 静默错位（旧库迁移出 content_hash 为 NULL 的那次就是这么踩的）。
-func insertModel(ctx context.Context, tx *sql.Tx, model Model) error {
+func insertModel(ctx context.Context, tx *sql.Tx, target string, model Model) error {
 	var levels any
 	if len(model.ReasoningLevels) > 0 {
 		data, err := json.Marshal(model.ReasoningLevels)
@@ -222,7 +213,7 @@ func insertModel(ctx context.Context, tx *sql.Tx, model Model) error {
 		}
 		levels = string(data)
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO provider_models(provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order) VALUES(?,?,?,?,?,?,?,?)`, model.ProviderID, model.ModelID, model.DisplayName, model.ContextWindow, levels, model.DefaultReasoningLevel, model.IsDefault, model.SortOrder)
+	_, err := tx.ExecContext(ctx, `INSERT INTO provider_models(target,provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order) VALUES(?,?,?,?,?,?,?,?,?)`, target, model.ProviderID, model.ModelID, model.DisplayName, model.ContextWindow, levels, model.DefaultReasoningLevel, model.IsDefault, model.SortOrder)
 	return err
 }
 
@@ -259,16 +250,15 @@ func (s *Store) Upsert(ctx context.Context, entry Entry) error {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	targets, _ := json.Marshal(p.Targets)
 	extra, err := json.Marshal(p.Extra)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO providers(id,display_name,targets,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,targets=excluded.targets,base_url=excluded.base_url,model=excluded.model,extra_json=excluded.extra_json,source=excluded.source,updated_at=excluded.updated_at,secret_mode=excluded.secret_mode,status=excluded.status,content_hash=excluded.content_hash`, p.ID, p.DisplayName, string(targets), p.BaseURL, p.Model, string(extra), p.Source, p.CreatedAt, p.UpdatedAt, p.SecretMode, p.Status, p.ContentHash)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM providers WHERE target=? AND (id=? OR display_name=?)`, p.Target, p.ID, p.DisplayName); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM provider_models WHERE provider_id=?`, p.ID); err != nil {
+	_, err = tx.ExecContext(ctx, `INSERT INTO providers(target,id,display_name,base_url,model,extra_json,source,created_at,updated_at,secret_mode,status,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.Target, p.ID, p.DisplayName, p.BaseURL, p.Model, string(extra), p.Source, p.CreatedAt, p.UpdatedAt, p.SecretMode, p.Status, p.ContentHash)
+	if err != nil {
 		return err
 	}
 	for _, model := range entry.Models {
@@ -276,36 +266,31 @@ func (s *Store) Upsert(ctx context.Context, entry Entry) error {
 		if strings.TrimSpace(model.ModelID) == "" {
 			return fmt.Errorf("模型 ID 不能为空")
 		}
-		if err = insertModel(ctx, tx, model); err != nil {
+		if err = insertModel(ctx, tx, p.Target, model); err != nil {
 			return err
 		}
 	}
-	if len(entry.Secrets) > 0 {
-		if _, err = tx.ExecContext(ctx, `DELETE FROM provider_secrets WHERE provider_id=?`, p.ID); err != nil {
-			return err
-		}
-		for k, v := range entry.Secrets {
-			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_secrets VALUES(?,?,?)`, p.ID, k, s.cipher.Seal([]byte(v), p.ID+":"+k)); err != nil {
-				return fmt.Errorf("保存加密凭据失败")
-			}
+	for k, v := range entry.Secrets {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO provider_secrets(target,provider_id,key_name,ciphertext) VALUES(?,?,?,?)`, p.Target, p.ID, k, s.cipher.Seal([]byte(v), p.Target+":"+p.ID+":"+k)); err != nil {
+			return fmt.Errorf("保存加密凭据失败")
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) SetDisabledExcept(ctx context.Context, seen []string) ([]string, error) {
+func (s *Store) SetDisabledExcept(ctx context.Context, target string, seen []string) ([]string, error) {
 	seenSet := map[string]bool{}
 	for _, id := range seen {
 		seenSet[id] = true
 	}
-	items, err := s.List(ctx, "")
+	items, err := s.List(ctx, target)
 	if err != nil {
 		return nil, err
 	}
 	disabled := []string{}
 	for _, p := range items {
 		if p.Source == "cc-switch-import" && !seenSet[p.ID] && p.EffectiveStatus() != "disabled" {
-			if _, err = s.db.ExecContext(ctx, `UPDATE providers SET status='disabled',updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), p.ID); err != nil {
+			if _, err = s.db.ExecContext(ctx, `UPDATE providers SET status='disabled',updated_at=? WHERE target=? AND id=?`, time.Now().UTC().Format(time.RFC3339Nano), p.Target, p.ID); err != nil {
 				return nil, err
 			}
 			disabled = append(disabled, p.ID)
@@ -334,8 +319,8 @@ func (s *Store) HardPrune(ctx context.Context) (int64, error) {
 	}
 	return r.RowsAffected()
 }
-func (s *Store) Get(ctx context.Context, id string) (Provider, error) {
-	list, e := s.List(ctx, "")
+func (s *Store) Get(ctx context.Context, target, id string) (Provider, error) {
+	list, e := s.List(ctx, target)
 	if e != nil {
 		return Provider{}, e
 	}
@@ -346,8 +331,8 @@ func (s *Store) Get(ctx context.Context, id string) (Provider, error) {
 	}
 	return Provider{}, fmt.Errorf("供应商不存在: %s", id)
 }
-func (s *Store) Secrets(ctx context.Context, id string) (map[string]string, error) {
-	rows, e := s.db.QueryContext(ctx, `SELECT key_name,ciphertext FROM provider_secrets WHERE provider_id=?`, id)
+func (s *Store) Secrets(ctx context.Context, target, id string) (map[string]string, error) {
+	rows, e := s.db.QueryContext(ctx, `SELECT key_name,ciphertext FROM provider_secrets WHERE target=? AND provider_id=?`, target, id)
 	if e != nil {
 		return nil, e
 	}
@@ -362,7 +347,7 @@ func (s *Store) Secrets(ctx context.Context, id string) (map[string]string, erro
 		if s.cipher == nil {
 			return nil, fmt.Errorf("密钥库未解锁")
 		}
-		v, e := s.cipher.Open(b, id+":"+k)
+		v, e := s.cipher.Open(b, target+":"+id+":"+k)
 		if e != nil {
 			return nil, e
 		}
@@ -370,8 +355,8 @@ func (s *Store) Secrets(ctx context.Context, id string) (map[string]string, erro
 	}
 	return out, rows.Err()
 }
-func (s *Store) Remove(ctx context.Context, id string) error {
-	r, e := s.db.ExecContext(ctx, `DELETE FROM providers WHERE id=?`, id)
+func (s *Store) Remove(ctx context.Context, target, id string) error {
+	r, e := s.db.ExecContext(ctx, `DELETE FROM providers WHERE target=? AND id=?`, target, id)
 	if e != nil {
 		return e
 	}

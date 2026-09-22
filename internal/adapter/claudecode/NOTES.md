@@ -4,17 +4,17 @@
 
 2026-09-17 用 Claude Code 2.1.268、临时 `CLAUDE_CONFIG_DIR`、虚构凭据和本地假 Anthropic SSE 服务做三组对照：原生默认启动能发现用户目录的 relay-handoff；加 `--setting-sources ""` 后该 Skill 消失；再加 `--plugin-dir <Relay插件目录>` 后恢复发现，三组均正常完成请求。
 
-因此 `InstallSkill` 按约定写入 `$CLAUDE_CONFIG_DIR/skills/relay-handoff`，而 `Render` 还会在 Relay 自己的 `rendered/claude-code/handoff-plugin` 内安装同一内嵌 Skill 和最小 `.claude-plugin/plugin.json`（`name=relay`、`skills=./`）。`BuildLaunchInputs` 显式附加该目录，隔离启动使用 `/relay:relay-handoff`。插件没有 hooks、MCP、凭据或其他用户 settings，不扩大配置来源；无 provider 时沿用原生 CLI 行为。
+因此 `InstallSkill` 按约定写入 `$CLAUDE_CONFIG_DIR/skills/relay-handoff`，而 `Render` 还会在 Relay 自己的 `rendered/claude/handoff-plugin` 内安装同一内嵌 Skill 和最小 `.claude-plugin/plugin.json`（`name=relay`、`skills=./`）。`BuildLaunchInputs` 显式附加该目录，隔离启动使用 `/relay:relay-handoff`。插件没有 hooks、MCP、凭据或其他用户 settings，不扩大配置来源；无 provider 时沿用原生 CLI 行为。
 
 验证日期：2026-09-17。只读查看本机 `claude --version`、`claude --help`，版本为 **2.1.268**；参考本地 Multica 的 `server/pkg/agent/claude.go`。请求行为使用临时 `CLAUDE_CONFIG_DIR`、临时工作目录、虚构凭据和 `127.0.0.1` HTTP 服务验证，没有调用真实模型或修改用户配置。
 
 ## 启动与凭据
 
 - 原生支持 `--settings <file-or-json>`、`--resume <id>`。无头模式使用 `-p --verbose --output-format stream-json`；保留调用方 prompt 与其余参数，相同协议参数归一化，冲突输出格式报错。
-- 2026-09-18 按 Relay v0.5 改为回调鉴权：JSON 渲染文件和全局 settings **不写供应商密钥**，只设置 `apiKeyHelper = "relay secret get claude-code <id>"`。helper 只向 stdout 输出密钥本体。
+- 2026-09-18 按 Relay v0.5 改为回调鉴权：JSON 渲染文件和全局 settings **不写供应商密钥**，只设置 `apiKeyHelper = "relay secret get claude <id>"`。helper 只向 stdout 输出密钥本体。
 - `switch` 合并非敏感配置；原生 `claude` 可通过 `apiKeyHelper` 自行读取 Relay 加密密钥。`run`/`exec` 不再向子进程环境注入主凭据，`render-env` 在默认 callback 模式下为空。
 - 已验证：即使进程环境已含 `ANTHROPIC_AUTH_TOKEN=fake-injected-token`，user settings 中的 `env.ANTHROPIC_AUTH_TOKEN=fake-global-token` 仍覆盖它，请求使用后者。仅清除父进程旧变量不足以隔离供应商。
-- 受控启动使用 `--settings <产物>`，保留 Claude Code 的正常 settings/Skill 发现链；启动环境显式清除继承的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，避免其认证优先级盖过 helper。调用方不得通过原生 `--settings`、`--setting-sources` 覆盖 Relay 配置。
+- 受控启动使用 `--settings <产物>`，保留 Claude Code 的正常 settings/Skill 发现链；启动环境显式清除继承的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，同时渲染 JSON 的 `env` 块也不再携带继承值，避免出现「两者并用」告警并让 `apiKeyHelper` 保持唯一认证路径。调用方不得通过原生 `--settings`、`--setting-sources` 覆盖 Relay 配置。
 - **同一对照验证确认：空 `--setting-sources` 同时关闭项目 `CLAUDE.md` 自动加载。** Relay 不声称保留该原生自动发现行为。需要项目指令时，显式提供 `--append-system-prompt-file <CLAUDE.md 路径>` 或在 prompt 中提供上下文；此处没有自行仿写 Claude 的项目指令搜索规则。管理员 managed settings 属于 Claude 自身策略，Relay 不绕过它。
 - 在合并环境前删除旧身份、base URL、模型别名与 Bedrock/Vertex/Foundry 选择变量，再设置当前供应商环境。禁止同时注入 AUTH_TOKEN 和 API_KEY，避免认证方式歧义。
 

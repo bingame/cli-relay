@@ -14,7 +14,7 @@ func isolateSkills(t *testing.T) (string, string, string) {
 	x := filepath.Join(root, "codex")
 	t.Setenv("CLAUDE_CONFIG_DIR", c)
 	t.Setenv("CODEX_HOME", x)
-	t.Setenv("RELAY_CLAUDE_CODE_BIN", filepath.Join(root, "missing-claude"))
+	t.Setenv("RELAY_CLAUDE_BIN", filepath.Join(root, "missing-claude"))
 	t.Setenv("RELAY_CODEX_BIN", filepath.Join(root, "missing-codex"))
 	return filepath.Join(root, "relay"), c, x
 }
@@ -22,7 +22,7 @@ func isolateSkills(t *testing.T) (string, string, string) {
 func TestSkillInstallExplicitOfflineAndIdempotent(t *testing.T) {
 	root, c, x := isolateSkills(t)
 	for range 2 {
-		out, err := command(t, root, "", "skill", "install", "--cli", "claude-code,codex,codex")
+		out, err := command(t, root, "", "skill", "install", "--cli", "claude,codex,codex")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +56,7 @@ func TestSkillInstallDetectionAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("RELAY_CODEX_BIN", binary)
-	if _, err := command(t, root, "", "skill", "install", "--cli", "claude-code,typo"); err == nil {
+	if _, err := command(t, root, "", "skill", "install", "--cli", "claude,typo"); err == nil {
 		t.Fatal("接受了未知 CLI")
 	}
 	if _, err := os.Stat(c); !os.IsNotExist(err) {
@@ -82,7 +82,7 @@ func TestSkillInstallReportsConflictAndContinuesOtherTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("手动定制"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := command(t, root, "", "skill", "install", "--cli", "claude-code,codex")
+	_, err := command(t, root, "", "skill", "install", "--cli", "claude,codex")
 	if err == nil || !strings.Contains(err.Error(), "保留") {
 		t.Fatal(err)
 	}

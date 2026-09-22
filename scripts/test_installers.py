@@ -40,7 +40,7 @@ def main():
             env[key] = str(root)
         env.update(CODEX_HOME=str(root / 'codex'), CLAUDE_CONFIG_DIR=str(root / 'claude'),
                    RELAY_HOME=str(root / 'relay-state'), RELAY_TEST_FIXTURES=str(fixtures),
-                   RELAY_CODEX_BIN=str(binary), RELAY_CLAUDE_CODE_BIN=str(binary), SHELL='/bin/bash', RELAY_DOWNLOAD_MODE='direct')
+                   RELAY_CODEX_BIN=str(binary), RELAY_CLAUDE_BIN=str(binary), SHELL='/bin/bash', RELAY_DOWNLOAD_MODE='direct')
         if windows:
             env['RELAY_NO_MODIFY_PATH'] = '1'
             asset = 'relay-windows-amd64.exe'

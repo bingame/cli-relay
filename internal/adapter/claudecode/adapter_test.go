@@ -13,7 +13,7 @@ import (
 )
 
 func fixtureProvider() provider.Provider {
-	return provider.Provider{ID: "fake-example", DisplayName: "虚构测试供应商", Targets: []string{"claude-code"}, BaseURL: "https://example.invalid/v1", Model: "fake-model", Extra: map[string]any{"claude_settings": map[string]any{"permissions": map[string]any{"allow": []string{"Read"}}, "env": map[string]any{"ANTHROPIC_DEFAULT_HAIKU_MODEL": "fake-small"}}}}
+	return provider.Provider{ID: "fake-example", DisplayName: "虚构测试供应商", Target: "claude", BaseURL: "https://example.invalid/v1", Model: "fake-model", Extra: map[string]any{"claude_settings": map[string]any{"permissions": map[string]any{"allow": []string{"Read"}}, "env": map[string]any{"ANTHROPIC_DEFAULT_HAIKU_MODEL": "fake-small"}}}}
 }
 
 func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
@@ -33,11 +33,11 @@ func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
 		t.Fatal("回调模式不应向进程环境注入凭据")
 	}
 	var settings map[string]any
-	if json.Unmarshal(artifact.Content, &settings) != nil || settings["apiKeyHelper"] != "relay secret get claude-code "+p.ID {
+	if json.Unmarshal(artifact.Content, &settings) != nil || settings["apiKeyHelper"] != "relay secret get claude "+p.ID {
 		t.Fatal("未生成 apiKeyHelper")
 	}
 	pluginPath := filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")
-	if !reflect.DeepEqual(launch.Args, []string{"--settings", artifact.Path}) {
+	if !reflect.DeepEqual(launch.Args, []string{"--setting-sources", "", "--plugin-dir", pluginPath, "--settings", artifact.Path}) {
 		t.Fatalf("argv 不符合隔离契约: %q", launch.Args)
 	}
 	for _, relative := range []string{"SKILL.md", ".claude-plugin/plugin.json"} {
@@ -96,8 +96,48 @@ func TestRenderConsumesOnlyWhitelistedSettings(t *testing.T) {
 	}
 }
 
+func TestRenderStripsInheritedClaudeCredentials(t *testing.T) {
+	a := New()
+	p := fixtureProvider()
+	p.Extra["claude_settings"] = map[string]any{"env": map[string]any{
+		"ANTHROPIC_AUTH_TOKEN": "fake-auth-token",
+		"ANTHROPIC_API_KEY":    "fake-api-key",
+		"SAFE_FLAG":            "yes",
+	}}
+	artifact, err := a.Render(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if json.Unmarshal(artifact.Content, &settings) != nil {
+		t.Fatal("渲染产物不是合法 JSON")
+	}
+	env := settings["env"].(map[string]any)
+	for _, key := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("渲染产物不应包含凭据字段 %s", key)
+		}
+	}
+	if env["SAFE_FLAG"] != "yes" || settings["apiKeyHelper"] != "relay secret get claude "+p.ID {
+		t.Fatal("未保留非凭据设置或未生成 Relay apiKeyHelper")
+	}
+	launch, err := a.BuildLaunchInputs(artifact, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		found := false
+		for _, name := range launch.UnsetEnv {
+			found = found || name == expected
+		}
+		if !found {
+			t.Fatalf("启动环境未清除 %s", expected)
+		}
+	}
+}
+
 func TestRenderRejectsSecretFieldsAndInvalidPaths(t *testing.T) {
-	for _, field := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OAUTH_TOKEN", "apiKey", "client_secret"} {
+	for _, field := range []string{"OAUTH_TOKEN", "apiKey", "client_secret"} {
 		t.Run(field, func(t *testing.T) {
 			p := fixtureProvider()
 			p.Extra["claude_settings"] = map[string]any{"env": map[string]any{field: "fake-secret-never-echo"}}

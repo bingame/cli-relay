@@ -58,7 +58,7 @@ func NewRootWithApp(a *App) *cobra.Command {
 		if mode := os.Getenv("RELAY_CODEX_LAUNCH_MODE"); mode != "" {
 			x.LaunchMode = mode
 		}
-		a.Adapters = map[string]adapter.LaunchAdapter{"claude-code": c, "codex": x}
+		a.Adapters = map[string]adapter.LaunchAdapter{"claude": c, "codex": x}
 	}
 	cmd := &cobra.Command{Use: "relay", Short: "为 AI Agent CLI 选择供应商并交接会话", SilenceUsage: true, SilenceErrors: true}
 	cmd.Version = version.String()

@@ -18,24 +18,21 @@ func (a *App) switchCommand() *cobra.Command {
 			return e
 		}
 		defer s.Close()
-		p, e := a.resolveProvider(cmd.Context(), s, args[0])
+		p, e := a.resolveProvider(cmd.Context(), s, target, args[0])
 		if e != nil {
 			return e
 		}
 		if p.EffectiveStatus() == "disabled" {
 			return fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
 		}
-		models, e := s.Models(cmd.Context(), p.ID)
+		models, e := s.Models(cmd.Context(), p.Target, p.ID)
 		if e != nil {
 			return e
 		}
-		targets := p.Targets
-		if target != "" {
-			if !p.Supports(target) {
-				return fmt.Errorf("供应商不支持指定 CLI")
-			}
-			targets = []string{target}
+		if target != "" && !p.Supports(target) {
+			return fmt.Errorf("供应商不支持指定 CLI")
 		}
+		targets := []string{p.Target}
 		for _, t := range targets {
 			if _, e = a.adapter(t); e != nil {
 				return e
@@ -62,6 +59,7 @@ func (a *App) switchCommand() *cobra.Command {
 		return outputJSON(cmd, current)
 	}}
 	cmd.Flags().StringVar(&target, "target", "", "只切换指定 CLI")
+	_ = cmd.RegisterFlagCompletionFunc("target", a.completeTargets())
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {
 			return nil, cobra.ShellCompDirectiveNoFileComp

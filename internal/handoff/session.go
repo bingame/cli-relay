@@ -21,7 +21,7 @@ func FindSessionFile(cli, id, nativeHome string) (string, error) {
 	}
 	var subdir string
 	switch cli {
-	case "claude-code":
+	case "claude":
 		subdir = "projects"
 	case "codex":
 		subdir = "sessions"

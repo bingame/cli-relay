@@ -106,7 +106,7 @@ func TestRawExtractCodexAndSensitiveArguments(t *testing.T) {
 }
 
 func TestFindSessionFileAndGitInfoNoRepository(t *testing.T) {
-	for _, cli := range []string{"claude-code", "codex"} {
+	for _, cli := range []string{"claude", "codex"} {
 		t.Run(cli, func(t *testing.T) {
 			home := t.TempDir()
 			subdir := "projects/fake-project"

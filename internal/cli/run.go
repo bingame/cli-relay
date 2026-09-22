@@ -39,7 +39,7 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 			return process.Options{}, e
 		}
 		defer s.Close()
-		p, e := a.resolveProvider(cmd.Context(), s, id)
+		p, e := a.resolveProvider(cmd.Context(), s, target, id)
 		if e != nil {
 			return process.Options{}, e
 		}
@@ -50,7 +50,7 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 		if p.EffectiveStatus() == "disabled" {
 			return process.Options{}, fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
 		}
-		models, e := s.Models(cmd.Context(), p.ID)
+		models, e := s.Models(cmd.Context(), p.Target, p.ID)
 		if e != nil {
 			return process.Options{}, e
 		}
@@ -65,7 +65,7 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 			}
 			s.SetCipher(v)
 		}
-		sec, e := s.Secrets(cmd.Context(), id)
+		sec, e := s.Secrets(cmd.Context(), p.Target, id)
 		if e != nil {
 			return process.Options{}, e
 		}
@@ -148,6 +148,7 @@ func (a *App) launchCommand(mode adapter.Mode) *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.ValidArgsFunction = a.completeTargetArg()
 	cmd.Flags().StringVar(&id, "provider", "", "本次使用的供应商 ID 或显示名称（不修改默认）")
 	_ = cmd.RegisterFlagCompletionFunc("provider", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		target := ""
@@ -159,7 +160,7 @@ func (a *App) launchCommand(mode adapter.Mode) *cobra.Command {
 	return cmd
 }
 
-func (a *App) providerSecretValues(cmd *cobra.Command, id string) ([]string, error) {
+func (a *App) providerSecretValues(cmd *cobra.Command, target, id string) ([]string, error) {
 	unlock, e := a.lock(cmd.Context())
 	if e != nil {
 		return nil, e
@@ -177,11 +178,11 @@ func (a *App) providerSecretValues(cmd *cobra.Command, id string) ([]string, err
 		}
 		s.SetCipher(v)
 	}
-	p, e := a.resolveProvider(cmd.Context(), s, id)
+	p, e := a.resolveProvider(cmd.Context(), s, target, id)
 	if e != nil {
 		return nil, e
 	}
-	values, e := s.Secrets(cmd.Context(), p.ID)
+	values, e := s.Secrets(cmd.Context(), p.Target, p.ID)
 	if e != nil {
 		return nil, e
 	}

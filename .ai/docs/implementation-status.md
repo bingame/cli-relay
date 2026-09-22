@@ -44,7 +44,7 @@
 
 - 增加 GoReleaser v2.9.0 配置、三系统 CI 和 tag 发布工作流；五平台 CGO=0 归档、Windows 裸 exe、SHA-256、Homebrew formula、Scoop manifest 由同一配置生成。版本固定原因见 `distribution/NOTES.md`。
 - 一行安装器支持公开 HTTPS 和现有私有仓库的 `RELAY_DOWNLOAD_MODE=gh`；先校验再原子替换，PATH 配置、升级、自动 Skill 安装都有明确失败行为。用户已确认先使用现有 `bingame/cli-relay`，不要求新域名上线。
-- `InstallSkill(targetDir string) error` 加入两个 Adapter；`relay skill install [--cli claude-code,codex]` 自动探测、离线安装，支持原生配置目录覆盖、幂等升级和用户修改保护，不初始化数据库或凭据库。
+- `InstallSkill(targetDir string) error` 加入两个 Adapter；`relay skill install [--cli claude,codex]` 自动探测、离线安装，支持原生配置目录覆盖、幂等升级和用户修改保护，不初始化数据库或凭据库。
 - 修复 Claude 隔离设置关闭用户 Skill 发现的问题：只额外加载 Relay 内嵌 Handoff 插件，保留供应商隔离。真实 Claude + 本地假服务验证 Skill 可见且使用正确的虚构凭据；复现入口 `scripts/verify_claude_skill.py`。
 - Go 模块路径改为 `github.com/bingame/cli-relay`，支持正常模块安装；增加发布版本输出。更新规范、README、Adapter NOTES 与发布说明。
 
@@ -58,7 +58,7 @@ GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平
 | --- | --- |
 | 前置验证 | Codex 0.154.0 / Claude Code 2.1.268 参数与本地假服务验证，真实 cc-switch schema/导出头验证；各模块 NOTES |
 | P0 | Provider SQLite/AES-GCM、两个 Adapter、mock 契约、add/list/remove/switch/run/status、私有文件权限 |
-| P1 | SQL 内存导入与快照加密、冲突重命名、dry-run；受监管执行、退出分类、会话记录、子进程树收尾 |
+| P1 | SQL 内存导入与快照加密、按 `(target,id)` 直接覆盖、dry-run；受监管执行、退出分类、会话记录、子进程树收尾 |
 | P2 | relay-handoff Skill、Markdown/YAML/JSON Schema 验证、活 agent 输出接收、continue 与硬约束重复强调 |
 | P3 | Codex 官方 thread/read 优先、无头 resume、容错 JSONL、可选总结供应商、来源凭据脱敏、降级标识 |
 | P4 | 仅独立接口预留；不含重试循环、通知发送或关机 |
@@ -68,7 +68,7 @@ GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平
 
 - Windows：`go test ./...`、`go vet ./...`。
 - 真实 SQL 完整 CLI 验证：18 条供应商、15 条支持的 target 渲染，61 条加密秘密数据、1 份加密 MCP/prompts 快照；dry-run 无写入，导入不自动 switch，输出及落盘文件未发现已识别凭据明文。
-- 2026-09-20 用用户 2026-09-19 生成的新导出（14 条供应商、18 列）复验：`TestParseRealDumpStatistics`、`TestRealDumpAdapterIntegration`（期望值改为从 dump 现场推导，不再硬编码上次的 15）；CLI 端到端（隔离 RELAY_HOME）覆盖 dry-run 报告 schema、manual 同名不参与匹配、撞号改名、`--on-conflict skip`、空导出 `--prune` 后 disabled 记录 `switch` 报"已被 cc-switch 同步标记为失效"、manual 记录不受清理影响；数据目录扫描未发现明文凭据。
+- 2026-09-20 用用户 2026-09-19 生成的新导出（14 条供应商、18 列）复验：`TestParseRealDumpStatistics`、`TestRealDumpAdapterIntegration`（期望值改为从 dump 现场推导，不再硬编码上次的 15）；CLI 端到端（隔离 RELAY_HOME）覆盖 dry-run 报告 schema、按 `(target,id)` 直接覆盖（含 manual 记录）、`--on-conflict skip`、空导出 `--prune` 后 disabled 记录 `switch` 报"已被 cc-switch 同步标记为失效"、manual 记录不受清理影响；数据目录扫描未发现明文凭据。
 - 适配器真实 Codex + 127.0.0.1 假 SSE：override、独立 profile、switch 后默认配置三种路径。
 - `scripts/verify_codex_relay.py`：真实 Relay CLI 的 exec 退出 0，鉴权/模型正确，会话记录成功；二进制别名完成 initialize、thread/start、turn/start、thread/read，及时转发 JSONL，退出 0。
 - WSL Ubuntu 20.04：实际执行 Linux process 和 cli 测试，包括 `syscall.Exec` 后 PID 不变、原生退出码保持、取消清理、超长行、脱敏、供应商切换隔离、dry-run、Handoff 降级及硬约束注入。

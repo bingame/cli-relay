@@ -19,7 +19,7 @@ func (a *App) skillCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			selected := targets
 			if !cmd.Flags().Changed("cli") {
-				for _, target := range []string{"claude-code", "codex"} {
+				for _, target := range []string{"claude", "codex"} {
 					if targetInstalled(target) {
 						selected = append(selected, target)
 					}
@@ -27,15 +27,15 @@ func (a *App) skillCommand() *cobra.Command {
 			}
 			// 先校验全部输入，避免拼写错误造成部分安装。
 			for _, target := range selected {
-				if target != "claude-code" && target != "codex" {
-					return fmt.Errorf("不支持的 Skill 目标: %q（可选 claude-code,codex）", target)
+				if target != "claude" && target != "codex" {
+					return fmt.Errorf("不支持的 Skill 目标: %q（可选 claude,codex）", target)
 				}
 				if _, err := a.adapter(target); err != nil {
 					return err
 				}
 			}
 			if len(selected) == 0 {
-				cmd.Println("未探测到 Claude Code 或 Codex；安装目标 CLI 后运行 relay skill install，也可显式指定 --cli claude-code,codex。")
+				cmd.Println("未探测到 Claude Code 或 Codex；安装目标 CLI 后运行 relay skill install，也可显式指定 --cli claude,codex。")
 				return nil
 			}
 			seen := map[string]bool{}
@@ -63,7 +63,7 @@ func (a *App) skillCommand() *cobra.Command {
 
 func targetInstalled(target string) bool {
 	binary := "codex"
-	if target == "claude-code" {
+	if target == "claude" {
 		binary = "claude"
 	}
 	if override := os.Getenv("RELAY_" + strings.ToUpper(strings.ReplaceAll(target, "-", "_")) + "_BIN"); override != "" {

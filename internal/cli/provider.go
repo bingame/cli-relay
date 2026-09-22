@@ -49,13 +49,16 @@ func (a *App) providerCommand() *cobra.Command {
 			return e
 		}
 		defer store.Close()
-		existing, err := store.List(cmd.Context(), "")
+		existing, err := store.List(cmd.Context(), p.Target)
 		if err != nil {
 			return err
 		}
 		for _, entry := range existing {
 			if entry.ID == p.ID {
 				return fmt.Errorf("供应商 ID 已存在: %s", p.ID)
+			}
+			if entry.DisplayName == p.DisplayName {
+				return fmt.Errorf("同一 CLI（%s）下显示名称已存在: %s", p.Target, p.DisplayName)
 			}
 		}
 		// 手工 `provider add --model X` 是用户显式声明，写成一条模型目录记录；
@@ -64,11 +67,9 @@ func (a *App) providerCommand() *cobra.Command {
 		if p.Model != "" {
 			models = append(models, provider.Model{ProviderID: p.ID, ModelID: p.Model, IsDefault: true})
 		}
-		for _, target := range p.Targets {
-			if ad, ok := a.Adapters[target]; ok {
-				if _, e = ad.Render(p, a.Home, models...); e != nil {
-					return e
-				}
+		if ad, ok := a.Adapters[p.Target]; ok {
+			if _, e = ad.Render(p, a.Home, models...); e != nil {
+				return e
 			}
 		}
 		if e = store.Import(cmd.Context(), []provider.Entry{{Provider: p, Secrets: sec, Models: models}}, "", nil); e != nil {
@@ -78,11 +79,12 @@ func (a *App) providerCommand() *cobra.Command {
 	}}
 	add.Flags().StringVar(&p.ID, "id", "", "供应商 ID")
 	add.Flags().StringVar(&p.DisplayName, "name", "", "显示名称")
-	add.Flags().StringSliceVar(&p.Targets, "target", nil, "目标 CLI，可重复或逗号分隔")
+	add.Flags().StringVar(&p.Target, "target", "", "目标 CLI")
 	add.Flags().StringVar(&p.BaseURL, "base-url", "", "API 地址")
 	add.Flags().StringVar(&p.Model, "model", "", "模型")
 	add.Flags().StringVar(&p.SecretMode, "secret-mode", "callback", "密钥模式：callback、env_key 或 env_inline")
 	add.Flags().BoolVar(&keyStdin, "api-key-stdin", false, "从标准输入读取 API key")
+	_ = add.RegisterFlagCompletionFunc("target", a.completeTargets())
 	_ = add.MarkFlagRequired("id")
 	_ = add.MarkFlagRequired("target")
 	var target string
@@ -102,6 +104,8 @@ func (a *App) providerCommand() *cobra.Command {
 		return outputJSON(cmd, p)
 	}}
 	list.Flags().StringVar(&target, "target", "", "按目标 CLI 筛选")
+	_ = list.RegisterFlagCompletionFunc("target", a.completeTargets())
+	removeTarget := ""
 	remove := &cobra.Command{Use: "remove <provider>", Short: "删除未激活的供应商及加密凭据", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		unlock, e := a.lock(cmd.Context())
 		if e != nil {
@@ -113,7 +117,7 @@ func (a *App) providerCommand() *cobra.Command {
 			return e
 		}
 		defer s.Close()
-		p, e := a.resolveProvider(cmd.Context(), s, args[0])
+		p, e := a.resolveProvider(cmd.Context(), s, removeTarget, args[0])
 		if e != nil {
 			return e
 		}
@@ -121,30 +125,29 @@ func (a *App) providerCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		for _, id := range current {
-			if id == p.ID {
-				return fmt.Errorf("供应商仍被全局默认引用，请先 switch 到其他供应商")
-			}
+		if current[p.Target] == p.ID {
+			return fmt.Errorf("供应商仍被全局默认引用，请先 switch 到其他供应商")
 		}
-		if e = s.Remove(cmd.Context(), p.ID); e != nil {
+		if e = s.Remove(cmd.Context(), p.Target, p.ID); e != nil {
 			return e
 		}
-		for t := range a.Adapters {
-			paths := []string{filepath.Join(a.Home, "rendered", t, p.ID+".json")}
-			if t == "codex" {
-				paths = []string{filepath.Join(a.Home, "rendered", t, p.ID+".toml.fragment"), filepath.Join(a.Home, "rendered", t, p.ID+".catalog.json")}
-			}
-			for _, path := range paths {
-				for _, candidate := range []string{path, path + ".relay-cache.json"} {
-					if e = os.Remove(candidate); e != nil && !os.IsNotExist(e) {
-						return e
-					}
+		t := p.Target
+		paths := []string{filepath.Join(a.Home, "rendered", t, p.ID+".json")}
+		if t == "codex" {
+			paths = []string{filepath.Join(a.Home, "rendered", t, p.ID+".toml.fragment"), filepath.Join(a.Home, "rendered", t, p.ID+".catalog.json")}
+		}
+		for _, path := range paths {
+			for _, candidate := range []string{path, path + ".relay-cache.json"} {
+				if e = os.Remove(candidate); e != nil && !os.IsNotExist(e) {
+					return e
 				}
 			}
 		}
 		return nil
 	}}
 	remove.ValidArgsFunction = a.completeProviders("")
+	remove.Flags().StringVar(&removeTarget, "target", "", "限定供应商所属 CLI（跨 CLI 同名时使用）")
+	_ = remove.RegisterFlagCompletionFunc("target", a.completeTargets())
 	prune := &cobra.Command{Use: "prune --hard", Short: "物理删除已禁用的供应商", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if !hardPrune {
 			return fmt.Errorf("必须显式指定 --hard")
@@ -211,63 +214,34 @@ func (a *App) importCommand() *cobra.Command {
 				return e
 			}
 			for _, p := range items {
-				existing[p.ID] = p
+				existing[providerKey(p.Target, p.ID)] = p
 			}
 		}
 		entries := make([]provider.Entry, 0, len(result.Providers))
-		seen := make([]string, 0, len(result.Providers))
-		used := map[string]bool{}
-		for id := range existing {
-			used[id] = true
-		}
+		seenByTarget := map[string][]string{}
+		seenSet := map[string]map[string]bool{}
 		report := []map[string]any{}
 		for _, entry := range result.Providers {
 			p := entry.Provider
-			original := p.ID
-			target := p.Targets[0]
-			match := ""
-			for id, old := range existing {
-				if old.Source == "cc-switch-import" && old.Supports(target) && provider.Slugify(old.DisplayName) == provider.Slugify(p.DisplayName) {
-					match = id
-					break
-				}
-			}
-			if match != "" {
-				p.ID = match
-			} else if used[p.ID] {
-				// spec §6：显示名 slug 被任何记录占用时，base 回退为
-				// slugify(display_name + "-" + target)，仍占用则从 -2 递增数字后缀。
-				base := provider.Slugify(strings.Join([]string{p.DisplayName, target}, "-"))
-				p.ID = base
-				for n := 2; used[p.ID]; n++ {
-					p.ID = fmt.Sprintf("%s-%d", base, n)
-				}
-			}
-			used[p.ID] = true
 			for i := range entry.Models {
 				entry.Models[i].ProviderID = p.ID
 			}
-			seen = append(seen, p.ID)
-			row := map[string]any{"id": p.ID, "original_id": entry.OriginalID, "display_name": p.DisplayName, "targets": p.Targets, "was_current": entry.Current}
+			seenByTarget[p.Target] = append(seenByTarget[p.Target], p.ID)
+			if seenSet[p.Target] == nil {
+				seenSet[p.Target] = map[string]bool{}
+			}
+			seenSet[p.Target][p.ID] = true
+			row := map[string]any{"id": p.ID, "original_id": entry.OriginalID, "display_name": p.DisplayName, "target": p.Target, "was_current": entry.Current}
 			if len(entry.Warnings) > 0 {
 				row["warnings"] = entry.Warnings
 			}
-			if p.ID != original {
-				row["conflict_renamed"] = true
-			}
-			if old, exists := existing[p.ID]; exists && old.Source == "cc-switch-import" && onConflict == "skip" {
+			if _, exists := existing[providerKey(p.Target, p.ID)]; exists && onConflict == "skip" {
 				row["skipped"] = true
 				report = append(report, row)
 				continue
 			}
-			unsupported := []string{}
-			for _, t := range p.Targets {
-				if _, ok := a.Adapters[t]; !ok {
-					unsupported = append(unsupported, t)
-				}
-			}
-			if len(unsupported) > 0 {
-				row["unsupported_targets"] = unsupported
+			if _, ok := a.Adapters[p.Target]; !ok {
+				row["unsupported_target"] = p.Target
 			}
 			if entry.Current {
 				row["suggestion"] = "relay switch " + p.ID
@@ -276,23 +250,20 @@ func (a *App) importCommand() *cobra.Command {
 			entries = append(entries, provider.Entry{Provider: p, Secrets: entry.Secrets, Models: entry.Models})
 		}
 		stale := []string{}
-		seenSet := map[string]bool{}
-		for _, id := range seen {
-			seenSet[id] = true
-		}
-		for id, old := range existing {
-			if old.Source == "cc-switch-import" && !seenSet[id] {
-				stale = append(stale, id)
+		for _, old := range existing {
+			if old.Source != "cc-switch-import" {
+				continue
+			}
+			if !seenSet[old.Target][old.ID] {
+				stale = append(stale, old.Target+"/"+old.ID)
 			}
 		}
 		sort.Strings(stale)
 		if !dry {
 			for _, entry := range entries {
-				for _, target := range entry.Provider.Targets {
-					if ad, ok := a.Adapters[target]; ok {
-						if _, e = ad.Render(entry.Provider, a.Home, entry.Models...); e != nil {
-							return fmt.Errorf("渲染供应商 %s 失败: %w", entry.Provider.ID, e)
-						}
+				if ad, ok := a.Adapters[entry.Provider.Target]; ok {
+					if _, e = ad.Render(entry.Provider, a.Home, entry.Models...); e != nil {
+						return fmt.Errorf("渲染供应商 %s 失败: %w", entry.Provider.ID, e)
 					}
 				}
 			}
@@ -301,12 +272,14 @@ func (a *App) importCommand() *cobra.Command {
 					return e
 				}
 			}
-			if e = store.RecordImport(cmd.Context(), result.FileHash, result.Snapshot, seen); e != nil {
+			if e = store.RecordImport(cmd.Context(), result.FileHash, result.Snapshot, allSeen(seenByTarget)); e != nil {
 				return e
 			}
 			if prune {
-				if _, e = store.SetDisabledExcept(cmd.Context(), seen); e != nil {
-					return e
+				for target := range a.Adapters {
+					if _, e = store.SetDisabledExcept(cmd.Context(), target, seenByTarget[target]); e != nil {
+						return e
+					}
 				}
 			}
 		}
@@ -343,7 +316,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 			return e
 		}
 		defer s.Close()
-		p, e := a.resolveProvider(cmd.Context(), s, args[1])
+		p, e := a.resolveProvider(cmd.Context(), s, args[0], args[1])
 		if e != nil {
 			return e
 		}
@@ -353,7 +326,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 		if p.EffectiveStatus() == "disabled" {
 			return fmt.Errorf("供应商已被 cc-switch 同步标记为失效: %s", p.ID)
 		}
-		models, e := s.Models(cmd.Context(), p.ID)
+		models, e := s.Models(cmd.Context(), p.Target, p.ID)
 		if e != nil {
 			return e
 		}
@@ -370,7 +343,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 				}
 				s.SetCipher(v)
 			}
-			sec, e = s.Secrets(cmd.Context(), p.ID)
+			sec, e = s.Secrets(cmd.Context(), p.Target, p.ID)
 			if e != nil {
 				return e
 			}
@@ -408,4 +381,17 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 	}
 	cmd.ValidArgsFunction = a.completeProviderArg()
 	return cmd
+}
+
+// providerKey 生成 (target, id) 的复合键，用于跨 CLI 的本地索引；
+// NUL 不出现在合法 ID 中，因此不会与普通字符串冲突。
+func providerKey(target, id string) string { return target + "\x00" + id }
+
+func allSeen(byTarget map[string][]string) []string {
+	out := []string{}
+	for _, ids := range byTarget {
+		out = append(out, ids...)
+	}
+	sort.Strings(out)
+	return out
 }

@@ -65,7 +65,7 @@ def main():
         for key in ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA']:
             env[key] = str(root)
         env.update(CLAUDE_CONFIG_DIR=str(config), CODEX_HOME=str(root / 'codex'),
-                   RELAY_HOME=str(root / 'relay'), RELAY_CLAUDE_CODE_BIN=claude,
+                   RELAY_HOME=str(root / 'relay'), RELAY_CLAUDE_BIN=claude,
                    RELAY_PASSPHRASE='relay-local-test-passphrase-only',
                    ANTHROPIC_AUTH_TOKEN=FAKE_KEY, ANTHROPIC_BASE_URL=f'http://127.0.0.1:{server.server_port}',
                    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1', DISABLE_AUTOUPDATER='1')
@@ -78,15 +78,15 @@ def main():
                 raise AssertionError('测试凭据进入 CLI 输出')
 
         try:
-            run([relay, 'skill', 'install', '--cli', 'claude-code'])
+            run([relay, 'skill', 'install', '--cli', 'claude'])
             for flags, expected in [([], True), (['--setting-sources', '', '--settings', str(root / 'empty-settings.json')], False)]:
                 LocalModel.observations.clear()
                 run([claude, *flags, '-p', '--model', 'claude-sonnet-4-5', 'Reply PROBE_OK'])
                 assert LocalModel.observations and any(o['skill'] for o in LocalModel.observations) == expected
-            run([relay, 'provider', 'add', '--id', 'probe', '--target', 'claude-code', '--base-url', env['ANTHROPIC_BASE_URL'],
+            run([relay, 'provider', 'add', '--id', 'probe', '--target', 'claude', '--base-url', env['ANTHROPIC_BASE_URL'],
                  '--model', 'claude-sonnet-4-5', '--api-key-stdin'], FAKE_KEY)
             LocalModel.observations.clear()
-            run([relay, 'exec', 'claude-code', '--provider', 'probe', '--', 'Reply PROBE_OK'])
+            run([relay, 'exec', 'claude', '--provider', 'probe', '--', 'Reply PROBE_OK'])
             assert LocalModel.observations
             assert all(o['auth'] for o in LocalModel.observations), '全局配置覆盖了 Relay 凭据'
             assert any(o['plugin'] for o in LocalModel.observations), '隔离启动未加载 Handoff 插件'

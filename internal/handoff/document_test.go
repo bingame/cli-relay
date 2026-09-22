@@ -8,7 +8,7 @@ import (
 )
 
 func fixtureDocument() *Document {
-	d := &Document{SchemaVersion: 1, SourceCLI: "claude-code", SourceProvider: "fake-provider", SourceSessionID: "fake-session", GeneratedBy: "live-agent", GeneratedAt: "2026-09-17T08:00:00Z", Git: GitMetadata{WorkDir: "/fake/project", Branch: "main", HeadCommit: "0123456", Dirty: true}, Sections: map[string]string{}}
+	d := &Document{SchemaVersion: 1, SourceCLI: "claude", SourceProvider: "fake-provider", SourceSessionID: "fake-session", GeneratedBy: "live-agent", GeneratedAt: "2026-09-17T08:00:00Z", Git: GitMetadata{WorkDir: "/fake/project", Branch: "main", HeadCommit: "0123456", Dirty: true}, Sections: map[string]string{}}
 	for _, title := range SectionTitles {
 		d.Sections[title] = "无"
 	}
@@ -59,7 +59,7 @@ func TestDocumentRejectsInvalidMetadataAndTemplates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{strings.Replace(string(data), "schema_version: 1", "schema_version: 1\nschema_version: 1", 1), strings.Replace(string(data), "source_cli: claude-code\n", "", 1), string(data) + "\n## 目标\n重复目标\n", string(data) + "\n```\n未闭合", strings.Replace(string(data), "source_cli: claude-code", "unexpected: true\nsource_cli: claude-code", 1)} {
+	for _, text := range []string{strings.Replace(string(data), "schema_version: 1", "schema_version: 1\nschema_version: 1", 1), strings.Replace(string(data), "source_cli: claude\n", "", 1), string(data) + "\n## 目标\n重复目标\n", string(data) + "\n```\n未闭合", strings.Replace(string(data), "source_cli: claude", "unexpected: true\nsource_cli: claude", 1)} {
 		if _, err := Parse([]byte(text)); err == nil {
 			t.Fatal("应拒绝无效 Markdown/YAML")
 		}

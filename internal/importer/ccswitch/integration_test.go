@@ -26,14 +26,12 @@ func TestRealDumpAdapterIntegration(t *testing.T) {
 	// 真实 dump 是用户数据，供应商数量会随上游增删变化；期望值从 dump 现场推导。
 	expected := 0
 	for _, entry := range result.Providers {
-		for _, target := range entry.Provider.Targets {
-			if target == "claude-code" || target == "codex" {
-				expected++
-			}
+		if target := entry.Provider.Target; target == "claude" || target == "codex" {
+			expected++
 		}
 	}
 	if expected == 0 {
-		t.Skip("该导出中没有受支持的 claude-code/codex 供应商")
+		t.Skip("该导出中没有受支持的 claude/codex 供应商")
 	}
 	checked := checkAdapterIntegration(t, result)
 	if checked != expected {
@@ -72,11 +70,11 @@ func checkAdapterIntegration(t *testing.T, result *Result) int {
 	// 否则集成测试会写进用户真实的 $CODEX_HOME（config.toml + <id>.config.toml）。
 	codexAdapter := codex.New()
 	codexAdapter.NativeHome = t.TempDir()
-	adapters := map[string]adapter.LaunchAdapter{"claude-code": claudecode.New(), "codex": codexAdapter}
+	adapters := map[string]adapter.LaunchAdapter{"claude": claudecode.New(), "codex": codexAdapter}
 	root := t.TempDir()
 	checked := 0
 	for index, entry := range result.Providers {
-		for _, target := range entry.Provider.Targets {
+		for _, target := range []string{entry.Provider.Target} {
 			ad, supported := adapters[target]
 			if !supported {
 				if entry.Secrets["source_settings"] == "" {

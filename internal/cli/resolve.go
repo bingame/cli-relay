@@ -14,32 +14,42 @@ import (
 
 // resolveProvider 接受供应商 ID 或显示名称；ID 精确匹配优先，
 // 名称重名时报错并列出候选 ID（spec §4：所有 provider 参数同时接受两种写法）。
-func (a *App) resolveProvider(ctx context.Context, s *provider.Store, input string) (provider.Provider, error) {
-	providers, err := s.List(ctx, "")
+// target 非空时只在指定 CLI 内匹配，空字符串表示跨 CLI 匹配（此时同名不同 CLI 会报候选）。
+func (a *App) resolveProvider(ctx context.Context, s *provider.Store, target, input string) (provider.Provider, error) {
+	providers, err := s.List(ctx, target)
 	if err != nil {
 		return provider.Provider{}, err
 	}
 	named := []provider.Provider{}
+	exact := []provider.Provider{}
 	for _, p := range providers {
 		if p.ID == input {
-			return p, nil
+			exact = append(exact, p)
+			continue
 		}
 		if p.DisplayName == input {
 			named = append(named, p)
 		}
 	}
-	switch len(named) {
-	case 0:
-		return provider.Provider{}, fmt.Errorf("未找到供应商: %s（可传 ID 或显示名称，relay provider list 查看）", input)
-	case 1:
-		return named[0], nil
+	if len(exact) == 1 {
+		return exact[0], nil
 	}
-	ids := make([]string, 0, len(named))
-	for _, p := range named {
-		ids = append(ids, p.ID)
+	candidates := exact
+	if len(candidates) == 0 {
+		candidates = named
+	}
+	switch len(candidates) {
+	case 0:
+		return provider.Provider{}, fmt.Errorf("未找到供应商: %s（可传 ID 或显示名称，relay provider list 查看；跨 CLI 同名时请用 --target 或 <cli> 限定）", input)
+	case 1:
+		return candidates[0], nil
+	}
+	ids := make([]string, 0, len(candidates))
+	for _, p := range candidates {
+		ids = append(ids, p.Target+"/"+p.ID)
 	}
 	sort.Strings(ids)
-	return provider.Provider{}, fmt.Errorf("显示名称 %q 对应多个供应商，请改用 ID: %s", input, strings.Join(ids, ", "))
+	return provider.Provider{}, fmt.Errorf("%q 对应多个 CLI 的供应商，请改用 --target 或 CLI 参数限定: %s", input, strings.Join(ids, ", "))
 }
 
 // completeProviders 为 provider 参数提供 shell 补全候选：ID（描述为显示名称）
@@ -84,6 +94,17 @@ func (a *App) completeTargets() func(*cobra.Command, []string, string) ([]string
 		}
 		sort.Strings(targets)
 		return targets, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+// completeTargetArg 只补第一个位置参数里的目标 CLI；后续参数通常是
+// 传给原生 CLI 的参数，不应继续注入 relay 的 CLI 候选。
+func (a *App) completeTargetArg() func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return a.completeTargets()(cmd, args, toComplete)
 	}
 }
 

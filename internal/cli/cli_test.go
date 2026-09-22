@@ -11,7 +11,6 @@ import (
 
 	"github.com/bingame/cli-relay/internal/adapter"
 	"github.com/bingame/cli-relay/internal/adapter/mock"
-	"github.com/bingame/cli-relay/internal/provider"
 	"github.com/spf13/cobra"
 )
 
@@ -31,9 +30,9 @@ func TestProviderResolutionByDisplayName(t *testing.T) {
 	root := t.TempDir()
 	native := t.TempDir()
 	t.Setenv("CODEX_HOME", native)
-	add := func(id, name string) {
+	add := func(id, name, target string) {
 		t.Helper()
-		args := []string{"provider", "add", "--id", id, "--target", "codex", "--base-url", "https://example.test/v1"}
+		args := []string{"provider", "add", "--id", id, "--target", target, "--base-url", "https://example.test/v1"}
 		if name != "" {
 			args = append(args, "--name", name)
 		}
@@ -41,9 +40,9 @@ func TestProviderResolutionByDisplayName(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	add("one", "友好渠道")
-	add("two", "dup")
-	add("three", "dup")
+	add("one", "友好渠道", "codex")
+	add("two", "dup", "codex")
+	add("three", "dup", "claude")
 	if _, e := command(t, root, "", "switch", "友好渠道", "--target", "codex"); e != nil {
 		t.Fatal("显示名称 switch 失败", e)
 	}
@@ -63,7 +62,7 @@ func TestProviderResolutionByDisplayName(t *testing.T) {
 	if _, e = command(t, root, "", "provider", "remove", "不存在的供应商"); e == nil || !strings.Contains(e.Error(), "未找到供应商") {
 		t.Fatal("不存在应报未找到", e)
 	}
-	if _, e = command(t, root, "", "provider", "remove", "three"); e != nil {
+	if _, e = command(t, root, "", "provider", "remove", "three", "--target", "claude"); e != nil {
 		t.Fatal("按 ID 删除失败", e)
 	}
 }
@@ -72,12 +71,9 @@ func TestProviderCompletionCandidates(t *testing.T) {
 	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
 	root := t.TempDir()
 	t.Setenv("CODEX_HOME", t.TempDir())
-	add := func(id, name string, targets ...string) {
+	add := func(id, name, target string) {
 		t.Helper()
-		args := []string{"provider", "add", "--id", id, "--base-url", "https://example.test/v1", "--api-key-stdin"}
-		for _, target := range targets {
-			args = append(args, "--target", target)
-		}
+		args := []string{"provider", "add", "--id", id, "--target", target, "--base-url", "https://example.test/v1", "--api-key-stdin"}
 		if name != "" {
 			args = append(args, "--name", name)
 		}
@@ -87,7 +83,7 @@ func TestProviderCompletionCandidates(t *testing.T) {
 	}
 	add("one", "友好渠道", "codex")
 	add("two", "spaced name", "codex")
-	add("three", "claude-only", "claude-code")
+	add("three", "claude-only", "claude")
 	app := &App{Home: root}
 	cmd := NewRootWithApp(app)
 	cmd.SetContext(context.Background())
@@ -199,7 +195,7 @@ func TestImportDryRunAndDefaultOverwrite(t *testing.T) {
 	}
 }
 
-func TestImportManualCollisionUsesGenericRenameSignal(t *testing.T) {
+func TestImportManualCollisionOverwrites(t *testing.T) {
 	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
 	root := t.TempDir()
 	if _, err := command(t, root, "", "provider", "add", "--id", "codex", "--name", "Codex 演示", "--target", "codex"); err != nil {
@@ -223,19 +219,18 @@ func TestImportManualCollisionUsesGenericRenameSignal(t *testing.T) {
 			continue
 		}
 		found = true
-		expectedID := provider.Slugify("Codex 演示-codex")
-		if row["id"] != expectedID || row["conflict_renamed"] != true {
-			t.Fatalf("manual 撞号报告不符合约定: %#v", row)
+		if row["id"] != "codex" || row["target"] != "codex" || row["original_id"] != "demo" {
+			t.Fatalf("manual 撞号报告不符合直接覆盖约定: %#v", row)
 		}
-		if _, exists := row["shadowed_manual_id"]; exists {
-			t.Fatalf("报告不应追踪 manual 撞号来源: %#v", row)
+		if _, exists := row["conflict_renamed"]; exists {
+			t.Fatalf("覆盖语义下不应报告改名: %#v", row)
 		}
 	}
 	if !found {
 		t.Fatal("导入报告缺少 Codex 演示记录")
 	}
 
-	listed, err := command(t, root, "", "provider", "list", "--target", "codex")
+	listed, err := command(t, root, "", "provider", "list")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,9 +245,8 @@ func TestImportManualCollisionUsesGenericRenameSignal(t *testing.T) {
 	for _, item := range providers {
 		sources[item.ID] = item.Source
 	}
-	expectedID := provider.Slugify("Codex 演示-codex")
-	if sources["codex"] != "manual" || sources[expectedID] != "cc-switch-import" {
-		t.Fatalf("manual 记录被覆盖或导入记录未按规则改名: %#v", sources)
+	if len(sources) != 3 || sources["codex"] != "cc-switch-import" || sources["claude-attach"] != "cc-switch-import" {
+		t.Fatalf("manual 记录未被导入记录直接覆盖: %#v", sources)
 	}
 }
 

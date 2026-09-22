@@ -1,6 +1,6 @@
-# Relay 技术规格说明书 v0.10
+# Relay 技术规格说明书 v0.11
 
-> **v0.10 变更（模型目录只承载真实声明）**：真实使用中发现"cc-switch 里模型映射留空的渠道，经 Relay 启动后模型却被映射/锁死"（如 Codex 的 `axonhub-any`）。根因是三处把「默认模型」当成了「模型目录」：导入器用 `provider.Model` 伪造一条 `provider_models`、CodexAdapter 以 `len(models) > 0 || p.Model != ""` 为渲染条件、ClaudeCodeAdapter 无条件写 `modelPicker`。现统一收敛为 **`provider_models` 只承载源里真实声明的模型目录，为空就不渲染任何目录类字段**（§3.1 / §5.1 / §5.2 / §6）。同时按 cc-switch 的界面把模型目录的**可编辑字段边界**写进 spec（Codex：显示名/请求模型/上下文窗口/思考档位；Claude Code：显示名/请求模型/1M 上下文/默认兜底模型，见 §5.2.1），`provider_models` 因此新增 `reasoning_levels`、`default_reasoning_level` 两列与逐模型的档位渲染规则。
+> **v0.11 变更（按真实使用反馈收敛供应商模型与导入冲突语义）**：① Target CLI 名称改为与原生 CLI 一致的 `claude`（原先的 `claude-code` 废弃），下文所有 CLI 标识、渲染目录、`secret get` 等示例均已同步。② **供应商身份由 `(target, id)` 共同决定**：`Provider` 不再持有 `targets` 数组（多 CLI 共用一条记录），改为持有单个 `target`；因此 `providers` 主键从 `(id)` 改为 `(target, id)`，并新增 `UNIQUE(target, display_name)`——**不同 CLI 可同名供应商，同一 CLI 内显示名称唯一**，导入时也不再需要为供应商名追加 CLI 后缀。③ **导入冲突直接覆盖，不再生成 `slugify(display_name-target)` + 数字后缀**：以 `(target, id)` 为匹配键，`source = "manual"` 的记录同样参与覆盖（与 cc-switch 的覆盖行为一致），`conflict_renamed` 信号废弃，用户可放心清库重导，本版不做迁移与向下兼容。④ Claude Code 认证冲突警告：渲染产物与 `BuildLaunchInputs` 同时清除继承的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，只保留 `apiKeyHelper` 回调，避免出现「两者并用导致认证优先级混乱」的警告。
 
 > **v0.9 变更（Codex 模型目录实测修正）**：
 
@@ -40,8 +40,8 @@
 
 | 术语 | 含义 |
 |---|---|
-| `Provider` | 一个模型供应商的配置（base_url、api_key、model、额外字段），可映射到一个或多个 target CLI（`targets`），对应 cc-switch 的 "universal provider" 概念 |
-| `Target CLI` | 被适配的 agent CLI，MVP 覆盖 `claude-code`、`codex`，架构上预留 `cursor-agent` 等 |
+| `Provider` | 一个模型供应商的配置（base_url、api_key、model、额外字段），通过 `target` 绑定到单个 target CLI，对应 cc-switch 的 "universal provider" 概念（同一供应商可在不同 target 下各自保存） |
+| `Target CLI` | 被适配的 agent CLI，MVP 覆盖 `claude`、`codex`，架构上预留 `cursor-agent` 等 |
 | `Adapter` | 每个 target CLI 一个，声明「启动一个 provider 需要几段输入、每段是什么形态」，并实现渲染/校验/spawn 逻辑 |
 | `Rendered Artifact` | 由 Adapter 为某个 `(provider, target_cli)` 组合生成的、该 CLI 原生能理解的配置产物（Claude Code 是一份 settings JSON 文件；Codex 是 `config.toml` 里的 `[model_providers.x]`+`[profiles.x]` 片段 + 一个环境变量名） |
 | `current` | 全局激活的 provider 指针（每个 target CLI 各自维护一个），`relay switch` 修改它 |
@@ -105,18 +105,20 @@ flowchart TB
 
 ```sql
 CREATE TABLE providers (
-    id            TEXT PRIMARY KEY,      -- slug, 由 display_name 归一化而来, 如 "my-grok-relay"
+    target        TEXT NOT NULL,         -- 所属 CLI: "claude" | "codex" | ...
+    id            TEXT NOT NULL,         -- 供应商 ID, 由 display_name 归一化而来, 如 "my-grok-relay"
     display_name  TEXT NOT NULL,         -- 手动创建时用户自定; 从 cc-switch 导入时直接取其供应商名称
-    targets       TEXT NOT NULL,         -- JSON 数组: ["claude-code","codex"]
     base_url      TEXT,
     model         TEXT,                  -- 默认模型 id
-    secret_mode   TEXT,                  -- "env_key" | "auth_command"; 仅 codex 有意义, claude-code 恒为文件内联
+    secret_mode   TEXT,                  -- "env_key" | "auth_command"; 仅 codex 有意义, claude 恒为回调取密钥
     extra_json    TEXT,                  -- 极少数无法归类的 CLI 私有字段兜底透传, JSON (不再作为主要机制, 见下方"导入字段白名单")
     source        TEXT,                  -- "manual" | "cc-switch-import"
     status        TEXT DEFAULT 'active', -- "active" | "disabled" (被 cc-switch 同步判定为失效时置为 disabled, 见 §6)
     content_hash  TEXT,                  -- 该记录内容的哈希, 供渲染缓存判断是否需要重新渲染(见 §5.4)
     created_at    TEXT,
-    updated_at    TEXT
+    updated_at    TEXT,
+    PRIMARY KEY (target, id),
+    UNIQUE (target, display_name)        -- 同一 CLI 内显示名称唯一; 不同 CLI 允许同名
 );
 
 -- 模型目录: 对应 Codex 的 model_catalog_json 与 Claude Code 的 modelPicker.options,
@@ -125,6 +127,7 @@ CREATE TABLE providers (
 -- 上下文窗口、思考等级），其余字段（系统提示词、输入模态、并行工具调用等）目标 CLI 都有自己的
 -- 原生默认值，Relay 不编造，也不提供编辑入口——见 §5.2「可编辑字段边界」。
 CREATE TABLE provider_models (
+    target         TEXT NOT NULL,
     provider_id    TEXT NOT NULL,
     model_id       TEXT NOT NULL,        -- 如 "deepseek-v4-flash"
     display_name   TEXT,
@@ -133,14 +136,17 @@ CREATE TABLE provider_models (
     default_reasoning_level TEXT,        -- 供应商声明的默认档位; 空 = 未声明
     is_default     BOOLEAN DEFAULT 0,
     sort_order     INTEGER,
-    PRIMARY KEY (provider_id, model_id)
+    PRIMARY KEY (target, provider_id, model_id),
+    FOREIGN KEY (target, provider_id) REFERENCES providers(target, id) ON DELETE CASCADE
 );
 
 CREATE TABLE provider_secrets (
+    target        TEXT NOT NULL,
     provider_id   TEXT NOT NULL,
     key_name      TEXT NOT NULL,         -- 如 "api_key"
     ciphertext    BLOB NOT NULL,
-    PRIMARY KEY (provider_id, key_name)
+    PRIMARY KEY (target, provider_id, key_name),
+    FOREIGN KEY (target, provider_id) REFERENCES providers(target, id) ON DELETE CASCADE
 );
 
 CREATE TABLE import_log (
@@ -159,13 +165,13 @@ CREATE TABLE import_log (
 
 ### 3.2 `~/.relay/rendered/<target_cli>/<provider_id>.*`
 每个 Adapter 决定自己的产物格式：
-- `rendered/claude-code/<provider_id>.json` — 完整 Claude Code settings 片段（含 `env` 块）
+- `rendered/claude/<provider_id>.json` — 完整 Claude Code settings 片段（含 `env` 块，不含密钥）
 - `rendered/codex/<provider_id>.toml.fragment` — 待合并进 `~/.codex/config.toml` 的 `[model_providers.x]`/`[profiles.x]` 片段（本身不含明文密钥，只含 `env_key = "RELAY_<PROVIDER_ID>_KEY"`）
 
 ### 3.3 `~/.relay/current.json`
 ```json
 {
-  "claude-code": "my-provider1",
+  "claude": "my-provider1",
   "codex": "my-provider2"
 }
 ```
@@ -178,13 +184,13 @@ CREATE TABLE import_log (
 ```
 relay provider import --from cc-switch <file.sql> [--dry-run]
 relay provider list [--target <cli>]
-relay provider add --id <id> --target <cli>... --base-url <url> --model <m> [--api-key-stdin]
+relay provider add --id <id> --target <cli> --base-url <url> --model <m> [--api-key-stdin]
 relay provider remove <id>
 relay provider render-args <cli> <provider_id>      # 输出该 CLI 需要的 argv 片段(JSON 数组), 给 Multica custom_args 用
 relay provider render-env  <cli> <provider_id>      # 输出该 CLI 需要的 env 片段(KEY=VALUE 逐行), 给 Multica custom_env-file 用
 relay secret get <cli> <provider_id>                # 内部/回调用: 解密并仅打印密钥本体到 stdout, 供 apiKeyHelper/auth.command 调用
 
-relay switch <provider_id> [--target <cli>]         # 改全局默认；不指定 --target 则对 provider.targets 里所有 target 都切
+relay switch <provider_id> [--target <cli>]         # 改全局默认；不指定 --target 则对传入 CLI 或 current 里所有 target 分别切
 relay status                                        # 展示每个 target 当前 provider + 正在运行的 relay 管理的实例列表
 
 relay run  <cli> [--provider <id>] [-- <原生参数...>]   # 交互模式
@@ -195,7 +201,7 @@ relay handoff continue --doc <path> --cli <cli> [--provider <id>]
 relay handoff schema                                # 打印/校验 Handoff Doc 的 JSON Schema，供 Skill 引用
 ```
 
-所有接受供应商的参数（`--provider`、`switch`、`provider remove`、`render-args/render-env`、`secret get` 的 `<provider_id>`）同时接受 **ID 或显示名称**：ID 精确匹配优先；仅按显示名称命中时若重名，报错并列出候选 ID。这些参数提供 shell 补全（动态列出本地库中的 ID 与显示名称，失败时静默降级），`relay completion <shell>` 输出启用脚本。
+所有接受供应商的参数（`--provider`、`switch`、`provider remove`、`render-args/render-env`、`secret get` 的 `<provider_id>`）同时接受 **ID 或显示名称**：ID 精确匹配优先；仅按显示名称命中时若在多个 CLI 重名，报错并列出候选 ID（用 `--target` 或 `<cli>` 限定）。这些参数提供 shell 补全（动态列出本地库中的 ID 与显示名称，失败时静默降级），`relay completion <shell>` 输出启用脚本。
 
 退出码约定（供 `exec` 和外层编排器消费，见 §8.3）：`0` 成功；`10` 可重试的基础设施错误；`11` 检测到需要人类介入（如触发了 AskUserQuestion 类工具）；`12` 会话历史损坏需要冷启动重试；其余非零为未分类错误。
 
@@ -230,19 +236,19 @@ interface LaunchAdapter {
 
 ### 5.1 ClaudeCodeAdapter
 
-Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不是把明文塞进 `env` 块**：`apiKeyHelper` 设置指向一个脚本，Claude Code 需要密钥时调用它、取 stdout 作为凭据。**关键约束（官方认证优先级决定，必须遵守）**：Claude Code 的凭据优先级从高到低是「云厂商 > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper` > ...」——如果渲染出来的 `env` 块里还留着 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，`apiKeyHelper` 根本不会被用到。所以：
+Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不是把明文塞进 `env` 块**：`apiKeyHelper` 设置指向一个脚本，Claude Code 需要密钥时调用它、取 stdout 作为凭据。**关键约束（官方认证优先级决定，必须遵守）**：Claude Code 的凭据优先级从高到低是「云厂商 > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper` > ...」——因此若环境中同时存在 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 与 `apiKeyHelper`，Claude Code 会提示「Both ANTHROPIC_AUTH_TOKEN and apiKeyHelper set · auth may not work as expected」。Relay 的处理是**物理清除继承的这两个环境变量**（渲染 JSON 的 `env` 块与 `BuildLaunchInputs` 的 `UnsetEnv` 都不再包含它们，回调模式下 `render-env` 输出为空），只保留 `apiKeyHelper` 单一路径。所以：
 
 - `render()` 产出的 settings JSON 默认形如：
   ```json
   {
     "env": { "ANTHROPIC_BASE_URL": "<base_url>" },
-    "apiKeyHelper": "relay secret get claude-code <id>",
+    "apiKeyHelper": "relay secret get claude <id>",
     "modelPicker": { "options": [ /* 由 provider_models 渲染而来 */ ], "replaceBuiltInOptions": true }
   }
   ```
   `env` 块里**只放 `ANTHROPIC_BASE_URL`（非凭据，不参与优先级竞争）**，不放任何密钥字段，密钥完全交给 `apiKeyHelper` 回调 `relay secret get`。
 - **`modelPicker` 只在供应商**声明过**模型目录（`provider_models` 非空）时才写**：`replaceBuiltInOptions: true` 语义是「替换内置模型菜单」，给一个从未声明模型列表的中转渠道（如 cc-switch 里「模型映射」留空的渠道）凭空造一份单条 `modelPicker`，等于把"任意模型都能用"的渠道锁成一个模型——这正是本版修正的用户可见缺陷（见 §5.2 同类 gating）。未声明时 Relay 不写该字段，模型选择交回 Claude Code 原生机制（内置菜单 + `extra.claude_settings.env` 里透传的 `ANTHROPIC_DEFAULT_*_MODEL` 等变量，cc-switch 用的也是这套）。
-- `relay secret get claude-code <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
+- `relay secret get claude <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
 - 刷新间隔默认 5 分钟（`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` 可调），与 Codex 的 `refresh_interval_ms` 默认值（300000ms）刚好对称，两个 Adapter 的密钥回调设计可以共享同一套心智模型。
 - `env_key`/明文写入 `env` 块的方式依然作为可选降级路径保留（`secret_mode = "env_inline"`），供不方便跑回调命令的场景使用；此时 `renders()` 产出的 settings 文件里才会真正含有明文，需要 `0600` 权限保护。
 - `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`（保留其余用户已有 key，只覆盖 Relay 管理的字段，用注释/标记块界定 Relay 管理范围，避免覆盖用户手工添加的其他配置）。
@@ -348,7 +354,7 @@ Relay 遵循开放的 **Agent Skills specification**（`agentskills.io`），复
 - Claude Code：`~/.claude/skills/relay-handoff/SKILL.md`
 - Codex：`~/.codex/skills/relay-handoff/SKILL.md`（Codex 目前已原生支持标准 `SKILL.md` 格式）
 
-Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格绑定，不单独发版。`installSkill()` 用**覆盖写入**语义（不是 §5.4 那种 symlink/单一源模式，因为 canonical copy 活在二进制里而不是磁盘上）；`relay skill install [--cli claude-code,codex]` 默认探测本机已装的 target CLI 逐一安装，`relay skill update` 等价于「升级 Relay 后重新跑一次 install」，不需要单独的 update 生命周期。安装脚本（`curl | sh`）末尾默认自动跑一次此命令，同时保留独立子命令供后续单独触发。
+Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格绑定，不单独发版。`installSkill()` 用**覆盖写入**语义（不是 §5.4 那种 symlink/单一源模式，因为 canonical copy 活在二进制里而不是磁盘上）；`relay skill install [--cli claude,codex]` 默认探测本机已装的 target CLI 逐一安装，`relay skill update` 等价于「升级 Relay 后重新跑一次 install」，不需要单独的 update 生命周期。安装脚本（`curl | sh`）末尾默认自动跑一次此命令，同时保留独立子命令供后续单独触发。
 
 ---
 
@@ -365,15 +371,15 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 
    不得复制或猜测本 spec 早期草稿里出现过的任何 `providers` 列名和列顺序，也不得把曾经出现过的示例 `SELECT` 当作兼容性承诺。查询必须使用显式列名，并由已确认的 schema 映射构造，禁止 `SELECT *` 后按位置取值。若找不到导入所需的语义字段，应安全失败，并在不泄露字段值的前提下报告 schema 版本（若有）和探测到的列名，供人工确认。
 4. 对每一行，**按白名单只提取"用户级"语义字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走。以下描述的是要提取的**语义**，不是对 cc-switch 物理列名或 JSON 键名的固定声明；实际取值路径必须来自第 3 步的源码核对或现场探测：
-   - provider 所属应用类型 → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
+   - provider 所属应用类型 → 映射到 Relay 的 `target`（`claude` → `claude`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
    - provider 的设置载荷 → 按其实际格式反序列化，再提取基础 URL、API 密钥（→ `provider_secrets`，立刻加密，不落中间文件）、默认模型和模型目录等白名单语义；模型目录写入 `provider_models` 表，不塞进 `extra_json`（见 §3.1 变更）。载荷内部键名同样以所支持 cc-switch 版本的实际源码/数据为准，不沿用早期草稿中的名称猜测。
    - **模型目录只承载源里真实声明的「模型映射」**（Codex 侧是 `settings_config.modelCatalog` 的非空 `models` 数组；Claude Code 侧是其原生模型声明字段）。源里没有声明就必须**一条 `provider_models` 记录都不写入**——`provider.Model`（默认模型）不是模型目录，不得用它伪造记录，否则下游 Adapter 会因"目录非空"而渲染出 `model_catalog_json`/`modelPicker`，把"任意模型"渠道锁死（见 §5.2 gating）。逐条导入的字段限于显示名、模型 ID、上下文窗口、思考档位与默认档位；模型 ID 与显示名需按 cc-switch 的行为做 trim 后去重、跳过空值，默认档位取自源里的默认模型标记。
-   - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配范围仅限本地 `source = "cc-switch-import"` 的记录**——`source = "manual"` 的记录永远不参与这次匹配，即使 `(target, slugify(display_name))` 完全相同也不会被当作"已存在"，导入器会把它当新记录处理（见下方 ID 生成规则）。这不是遗漏，是和第 6 步"manual 记录永远不受清理逻辑影响"同一条原则的延伸：cc-switch 触发的自动化流程不应该静默覆盖用户手工维护的配置，宁可多出一条肉眼可见、可自行合并的重复记录，也不要静默覆盖看不见的手工字段。命中已有的 `cc-switch-import` 记录后按 `--on-conflict` 参数处理：
+   - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配与覆盖只按 `(target, id)` 进行**——本地已存在相同 `(target, id)`（无论 `source` 是 `manual` 还是 `cc-switch-import`）时，导入记录直接整体覆盖它；同一 CLI 内若既有记录与本条显示名称相同但 ID 不同，同样视为被覆盖（因为 `UNIQUE(target, display_name)` 不允许两者共存，cc-switch 也只在同一 CLI 内约束名称唯一）。这是刻意与 cc-switch 保持一致的"直接覆盖"语义：不生成数字后缀改名，不区分 `manual` 记录。命中后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
      - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。
-   - **未命中时的 ID 生成规则**：base 取 `slugify(display_name + "-" + target)`；若该 ID 已被任何记录占用（不分 source，纯粹是主键唯一性检查），从 `-2` 开始递增追加数字后缀直到不冲突（`-imported-N` 这类占位写法已废弃，不要采用）。发生撞号改名时，导入报告统一标记 `conflict_renamed: true`；这个信号已足够说明最终 ID 不是最初计算出的干净 slug，不要求区分撞号对象是 `manual` 还是 `cc-switch-import`，也不额外追踪被撞记录的 ID 或 Source。
+   - **ID 名称**：Relay 的 provider `id` 由 `slugify(display_name)` 归一化而来（不再拼接 target，也不再追加 `-2/-3...` 数字后缀）；cc-switch 的原始 `id` 仅作为 `original_id` 保留在报告里供追溯，不作为 Relay 的匹配键。因此**没有 `conflict_renamed` 信号**。不同 CLI 之间允许出现同 ID、同显示名称，由 `(target, id)` 主键与 `UNIQUE(target, display_name)` 各自约束。
 5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据；若这两张表里含凭据类内容需先加密再存（见 §10 安全要求第 4 条）。
-6. **失效清理**：把本次导出快照里出现的所有 provider 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
+6. **失效清理**：把本次导出快照里出现的所有 `(target, id)` 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且其 `(target, id)` 不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
    - 默认：只在导入报告里列出这些记录，不做任何改动。
    - `--prune`：把它们的 `status` 置为 `disabled`（软删除，数据保留）；`switch`/`run` 引用到 `disabled` 的 provider 时报错并提示"已被 cc-switch 同步标记为失效"，而不是静默找不到。
    - 物理删除是单独的命令 `relay provider prune --hard`，只清理已经 `disabled` 的记录，不作为 import 流程的自动副作用。
@@ -390,7 +396,7 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 | `dry_run` | 布尔，本次是否仅解析和报告而未写入本地存储 |
 | `count` | `providers` 中的报告条目数 |
 | `providers` | 本次导出快照中的 provider 报告数组，每条结构见下表 |
-| `stale_providers` | 本地存在、但本次导出快照未出现的 `cc-switch-import` provider id 数组；`manual` 记录不进入此数组 |
+| `stale_providers` | 本地存在、但本次导出快照未出现的 `cc-switch-import` provider 键数组（形如 `target/id`）；`manual` 记录不进入此数组 |
 
 `providers` 每条记录的字段：
 
@@ -399,12 +405,11 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 | `id` | 最终写入/命中的 Relay provider id |
 | `original_id` | cc-switch 导出记录中的原始 provider id，仅用于报告和追溯，不作为 Relay 的匹配键 |
 | `display_name` | 来自 cc-switch 的供应商名称 |
-| `targets` | 映射后的 Relay target 数组 |
+| `target` | 映射后的 Relay 单个 target（字符串） |
 | `was_current` | 布尔，该记录在 cc-switch 中是否为原激活项 |
 | `warnings` | 可选；解析时产生的非敏感警告数组，无警告时省略 |
-| `conflict_renamed` | 可选布尔；ID 生成阶段发生撞号重命名时为 `true`，不区分撞号对象的 Source，无撞号时省略 |
 | `skipped` | 可选布尔；`--on-conflict skip` 命中已有 `cc-switch-import` 记录时为 `true`，否则省略 |
-| `unsupported_targets` | 可选；当前没有 Adapter 的 target 数组，无不支持 target 时省略 |
+| `unsupported_target` | 可选；当前没有 Adapter 的 target 名（字符串），没有不支持 target 时省略 |
 | `suggestion` | 可选；`was_current` 为真时给出显式 `relay switch <id>` 建议，导入过程本身不执行切换 |
 
 `--dry-run` 只需要产出这份报告，不需要额外的展示格式规范；正式导入时同样的报告作为命令输出返回，供人读或者被脚本消费均可。可选布尔字段沿用当前的稀疏输出方式：条件不成立时省略，而不是显式输出 `false`。
@@ -442,7 +447,7 @@ Handoff Doc 是一份 Markdown 文件，但**必须包含以下固定结构**（
 ```markdown
 ---
 schema_version: 1
-source_cli: claude-code
+source_cli: claude
 source_provider: my-provider1
 source_session_id: <id, 若有>
 generated_by: live-agent | dead-session-resume | raw-file-fallback

@@ -39,5 +39,5 @@ func ResolveBinary(binary string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("不能直接启动脚本包装器 %s；请通过 RELAY_CODEX_BIN 或 RELAY_CLAUDE_CODE_BIN 指定原生 .exe", path)
+	return "", fmt.Errorf("不能直接启动脚本包装器 %s；请通过 RELAY_CODEX_BIN 或 RELAY_CLAUDE_BIN 指定原生 .exe", path)
 }

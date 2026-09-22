@@ -26,7 +26,7 @@ func (a *App) secretCommand() *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			p, err := a.resolveProvider(cmd.Context(), store, args[1])
+			p, err := a.resolveProvider(cmd.Context(), store, args[0], args[1])
 			if err != nil {
 				return err
 			}
@@ -36,7 +36,7 @@ func (a *App) secretCommand() *cobra.Command {
 			if p.EffectiveStatus() == "disabled" {
 				return fmt.Errorf("供应商已被 cc-switch 同步标记为失效")
 			}
-			values, err := store.Secrets(cmd.Context(), p.ID)
+			values, err := store.Secrets(cmd.Context(), p.Target, p.ID)
 			if err != nil {
 				return err
 			}

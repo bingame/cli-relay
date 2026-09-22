@@ -369,7 +369,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 		return Entry{}, err
 	}
 	entry := Entry{
-		Provider: provider.Provider{ID: provider.Slugify(name), DisplayName: name, Targets: []string{app}, Source: "cc-switch-import", SecretMode: "callback", Status: "active", Extra: map[string]any{}},
+		Provider: provider.Provider{ID: provider.Slugify(name), Target: app, DisplayName: name, Source: "cc-switch-import", SecretMode: "callback", Status: "active", Extra: map[string]any{}},
 		Secrets:  map[string]string{"source_settings": raw}, Current: current, OriginalID: id,
 	}
 	if rawMeta, ok := textValue(row["meta"]); ok {
@@ -377,7 +377,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 	}
 	switch app {
 	case "claude":
-		entry.Provider.Targets = []string{"claude-code"}
+		entry.Provider.Target = "claude"
 		env, _ := settings["env"].(map[string]any)
 		entry.Provider.BaseURL = firstString(env["ANTHROPIC_BASE_URL"], settings["base_url"])
 		entry.Provider.Model = firstString(env["ANTHROPIC_MODEL"], settings["model"])
@@ -630,7 +630,7 @@ func removeCredentialCopies(entry *Entry) error {
 		return false
 	}
 	public := []string{entry.Provider.ID, entry.OriginalID, entry.Provider.DisplayName, entry.Provider.BaseURL, entry.Provider.Model}
-	public = append(public, entry.Provider.Targets...)
+	public = append(public, entry.Provider.Target)
 	for _, model := range entry.Models {
 		// 模型目录同样会渲染进公开配置产物和 provider show 输出。
 		public = append(public, model.ModelID, model.DisplayName)

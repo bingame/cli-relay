@@ -34,7 +34,7 @@ func TestParseRealisticDump(t *testing.T) {
 		t.Fatal("file hash does not match original bytes")
 	}
 	claude := result.Providers[0]
-	if claude.Provider.ID != "claude-attach" || claude.Provider.DisplayName != "Claude '演示'; ATTACH" || !claude.Current || !claude.Provider.Supports("claude-code") {
+	if claude.Provider.ID != "claude-attach" || claude.Provider.DisplayName != "Claude '演示'; ATTACH" || !claude.Current || !claude.Provider.Supports("claude") {
 		t.Fatal("Claude column or target mapping failed")
 	}
 	if claude.Provider.BaseURL != "https://claude.example.test" || claude.Provider.Model != "claude-example" {
@@ -438,9 +438,7 @@ func TestParseRealDumpStatistics(t *testing.T) {
 	}
 	targets := map[string]int{}
 	for _, entry := range result.Providers {
-		for _, target := range entry.Provider.Targets {
-			targets[target]++
-		}
+		targets[entry.Provider.Target]++
 		encoded, err := json.Marshal(entry.Provider)
 		if err != nil {
 			t.Fatal("供应商元数据编码失败")

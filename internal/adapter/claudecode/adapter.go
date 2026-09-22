@@ -19,7 +19,7 @@ type Adapter struct{ Binary string }
 var _ adapter.LaunchAdapter = (*Adapter)(nil)
 
 func New() *Adapter             { return &Adapter{Binary: "claude"} }
-func (*Adapter) Target() string { return "claude-code" }
+func (*Adapter) Target() string { return "claude" }
 
 func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provider.Model) (adapter.Artifact, error) {
 	if err := p.Validate(); err != nil {
@@ -44,6 +44,13 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 		// spec §6 导入白名单：只消费用户级语义字段。permissions/hooks/
 		// statusLine 等运行环境配置属于 Relay 全局配置，不进入渲染产物。
 		if env, ok := source["env"]; ok {
+			if values, ok := env.(map[string]any); ok {
+				// 旧版 cc-switch 可能把凭据放在 env 中；Relay 统一改用
+				// apiKeyHelper，并清除继承的 ANTHROPIC_AUTH_TOKEN/API_KEY，
+				// 避免 Claude Code 报告鉴权来源冲突。
+				delete(values, "ANTHROPIC_AUTH_TOKEN")
+				delete(values, "ANTHROPIC_API_KEY")
+			}
 			settings["env"] = env
 		}
 	}
@@ -60,12 +67,10 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 	if p.Model != "" {
 		settings["model"] = p.Model
 	}
-	delete(env, "ANTHROPIC_AUTH_TOKEN")
-	delete(env, "ANTHROPIC_API_KEY")
 	if len(env) > 0 {
 		settings["env"] = env
 	}
-	settings["apiKeyHelper"] = "relay secret get claude-code " + p.ID
+	settings["apiKeyHelper"] = "relay secret get claude " + p.ID
 	if len(models) > 0 {
 		options := make([]map[string]any, 0, len(models))
 		for _, model := range models {
@@ -118,7 +123,13 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, _ adapter.Resolve
 	if binary == "" {
 		binary = "claude"
 	}
-	return adapter.LaunchInputs{Binary: binary, Args: []string{"--settings", artifact.Path}, Env: map[string]string{}, UnsetEnv: append([]string(nil), providerEnv...)}, nil
+	pluginDir := filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")
+	return adapter.LaunchInputs{
+		Binary:   binary,
+		Args:     []string{"--setting-sources", "", "--plugin-dir", pluginDir, "--settings", artifact.Path},
+		Env:      map[string]string{},
+		UnsetEnv: append([]string(nil), providerEnv...),
+	}, nil
 }
 
 func (*Adapter) NativeArgs(mode adapter.Mode, args []string) ([]string, error) {
@@ -169,7 +180,7 @@ func (*Adapter) NativeArgs(mode adapter.Mode, args []string) ([]string, error) {
 func (*Adapter) ResumeArgs(id string) []string { return []string{"--resume", id} }
 
 func artifactSettings(artifact adapter.Artifact) (map[string]any, error) {
-	if artifact.Target != "claude-code" || !provider.ValidID(artifact.ProviderID) {
+	if artifact.Target != "claude" || !provider.ValidID(artifact.ProviderID) {
 		return nil, fmt.Errorf("无效的 Claude Code 渲染产物")
 	}
 	var settings map[string]any
@@ -218,7 +229,7 @@ func rejectCredentialFields(value any) error {
 	case map[string]any:
 		for key, child := range value {
 			if key == "apiKeyHelper" {
-				if helper, ok := child.(string); !ok || !strings.HasPrefix(helper, "relay secret get claude-code ") {
+				if helper, ok := child.(string); !ok || !strings.HasPrefix(helper, "relay secret get claude ") {
 					return fmt.Errorf("Claude Code apiKeyHelper 必须由 Relay 管理")
 				}
 				continue

@@ -95,7 +95,7 @@ sh scripts/install-local.sh [--test] [--skip-skill] [--no-backup] [--install-dir
 
 安装目录与 `install.ps1` / `install.sh` 一致：Windows 为 `%LOCALAPPDATA%\Relay\bin`，Unix 为 `~/.local/bin`，可用 `-InstallDir` / `--install-dir` 或 `RELAY_INSTALL_DIR` 覆盖。`--version` 显示 `v0.0.0-local+<短 SHA>`，工作区有未提交改动时追加 `.dirty`；正式 tag 只由 GoReleaser 注入。运行中的 relay 会占用 exe，脚本检测到进程时会直接报错并要求先退出。
 
-手动添加支持重复 `--target`。API key 从 stdin 输入，不能放入 argv：
+手动添加需指定单个 `--target`（一个供应商只绑定一个 CLI）。API key 从 stdin 输入，不能放入 argv：
 
 ```sh
 read -r -s -p 'API key: ' RELAY_INPUT_KEY; printf '\n'
@@ -110,14 +110,14 @@ unset RELAY_INPUT_KEY
 | 命令 | 行为 |
 | --- | --- |
 | `provider add/list/remove` | 管理供应商；删除仍被 current 引用的供应商会报错 |
-| `provider import --from cc-switch <sql> [--dry-run]` | 内存执行受限 SQL dump、解析真实列、加密凭据和原始快照；冲突 ID 按 `slugify(display_name-target)` + `-2`/`-3...` 数字后缀生成，手动配置的记录不参与覆盖匹配，若占用同一 ID 则导入记录追加数字后缀 |
+| `provider import --from cc-switch <sql> [--dry-run]` | 内存执行受限 SQL dump、解析真实列、加密凭据和原始快照；按 `(target, id)` 直接覆盖本地记录（含手动配置），同名供应商只在同一 CLI 内唯一，不同 CLI 可同名；不生成数字后缀改名 |
 | `provider render-args <cli> <id>` | 输出原生参数 JSON 数组，不包含密钥 |
 | `provider render-env <cli> <id> [--format dotenv\|json]` | 输出启动环境；默认 `KEY=VALUE`，Multica 使用 JSON |
 | `switch <id> [--target <cli>]` | 合并原生非敏感配置并修改指定 target 的 current 指针 |
 | `run <cli> [--provider <id>] -- ...` | 原生交互；Unix 使用 `syscall.Exec`，Windows 继承控制台后等待子进程 |
 | `exec <cli> [--provider <id>] -- ...` | 单次无头运行、实时转发输出、记录会话、返回分类退出码 |
 | `status` | 输出 current 和仍存活的管理实例；不是完整系统进程枚举 |
-| `skill install [--cli claude-code,codex]` | 从二进制离线安装 Handoff Skill，默认只安装本机可探测到的 CLI |
+| `skill install [--cli claude,codex]` | 从二进制离线安装 Handoff Skill，默认只安装本机可探测到的 CLI |
 | `--version` | 显示发布版本 |
 | `handoff schema [--validate <doc>]` | 输出 JSON Schema，或校验 Markdown 文档 |
 | `handoff export --cli <cli> --live` | 输出应交给活 agent 的请求；不会假装读取活 agent 的内存 |
@@ -134,7 +134,7 @@ unset RELAY_INPUT_KEY
 **Claude Code：为了避免全局 settings 覆盖本次供应商凭据，启动使用 `--setting-sources ""`。本机 2.1.268 实测此选项也关闭 `CLAUDE.md` 自动加载。** 需要项目指令时明确传入，例如：
 
 ```sh
-relay run claude-code --provider example -- --append-system-prompt-file ./CLAUDE.md
+relay run claude --provider example -- --append-system-prompt-file ./CLAUDE.md
 ```
 
 导入的非敏感 Claude settings 经渲染文件传入；API key 和自定义敏感 header 只通过环境注入。`switch` 用 `.relay-managed.json` 记录管理字段，保留其他用户字段，发现管理字段被手工改动时拒绝覆盖。
@@ -155,7 +155,7 @@ Codex 默认使用 `-c` 内联非敏感供应商定义，未执行 switch 也可
 
 ```sh
 relay skill install
-relay skill install --cli claude-code,codex
+relay skill install --cli claude,codex
 ```
 
 默认安装到 `~/.claude/skills/relay-handoff/SKILL.md` 和 `~/.codex/skills/relay-handoff/SKILL.md`，支持 `CLAUDE_CONFIG_DIR` / `CODEX_HOME`。显式 `--cli` 不要求目标 CLI 已安装；自动探测只检查入口，不启动模型。没有目标 CLI 时给出提示。已有同名手动文件或被编辑过的内容会保留并报错，备份移走该文件后可重试；未手改的 Relay Skill 自动升级。
@@ -164,7 +164,7 @@ relay skill install --cli claude-code,codex
 
 ```sh
 relay handoff export --cli codex --input handoff-from-agent.md -o handoff.md
-relay handoff continue --doc handoff.md --cli claude-code --provider other-provider
+relay handoff continue --doc handoff.md --cli claude --provider other-provider
 
 relay handoff export --cli codex --dead --session SESSION_ID -o handoff.md
 relay handoff continue --doc handoff.md --cli codex --exec
@@ -212,7 +212,7 @@ Claude 接入还受其 settings 隔离限制：Multica 写入工作目录的 `CL
 - 路径限制拒绝供应商/session ID 遍历及符号链接文件。此工具不承诺抵御已经拥有同用户权限、并发篡改所有父目录的本机攻击者。
 - 导入未知 target 会保留数据库条目及加密原配置，不生成适配产物。导入报告提示旧 current，不替用户自动切换。
 
-可以通过 `RELAY_CODEX_BIN` / `RELAY_CLAUDE_CODE_BIN` 指定原生可执行文件。Windows 自动识别常见 npm Codex 安装目录中的 `codex.exe`，不会把原生参数交给 `cmd.exe` 二次解释。
+可以通过 `RELAY_CODEX_BIN` / `RELAY_CLAUDE_BIN` 指定原生可执行文件。Windows 自动识别常见 npm Codex 安装目录中的 `codex.exe`，不会把原生参数交给 `cmd.exe` 二次解释。
 
 ## 开发验证
 

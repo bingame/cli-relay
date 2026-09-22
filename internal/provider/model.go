@@ -7,14 +7,13 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 )
 
 type Provider struct {
 	ID          string         `json:"id"`
+	Target      string         `json:"target"`
 	DisplayName string         `json:"display_name"`
-	Targets     []string       `json:"targets"`
 	BaseURL     string         `json:"base_url,omitempty"`
 	Model       string         `json:"model,omitempty"`
 	SecretMode  string         `json:"secret_mode,omitempty"`
@@ -103,18 +102,16 @@ func Slugify(value string) string {
 var validID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,119}$`)
 
 func ValidID(id string) bool                   { return validID.MatchString(id) }
-func (p Provider) Supports(target string) bool { return slices.Contains(p.Targets, target) }
+func (p Provider) Supports(target string) bool { return p.Target == target }
 func (p Provider) Validate() error {
 	if !ValidID(p.ID) {
 		return fmt.Errorf("供应商 ID 只能包含字母、数字、短横线和下划线，长度 1–120")
 	}
-	if strings.TrimSpace(p.DisplayName) == "" || len(p.Targets) == 0 {
+	if strings.TrimSpace(p.DisplayName) == "" || p.Target == "" {
 		return fmt.Errorf("供应商名称和目标 CLI 不能为空")
 	}
-	for _, target := range p.Targets {
-		if !ValidID(target) {
-			return fmt.Errorf("无效的目标 CLI")
-		}
+	if !ValidID(p.Target) {
+		return fmt.Errorf("无效的目标 CLI")
 	}
 	if mode := p.EffectiveSecretMode(); mode != "callback" && mode != "env_key" && mode != "env_inline" {
 		return fmt.Errorf("无效的密钥模式")

@@ -24,15 +24,15 @@ with tempfile.TemporaryDirectory(prefix='relay-import-verify-') as directory:
     assert not (root/'current.json').exists(),'导入自动switch'
     renders=0; checked_secrets=[]
     for row in report['providers']:
-        for target in row['targets']:
-            if target not in ('codex','claude-code'): continue
-            args=call('provider','render-args',target,row['id'])
-            values=call('provider','render-env',target,row['id'],'--format','json')
-            sensitive=[value for key,value in values.items() if len(value)>=8 and ('KEY' in key or 'TOKEN' in key or 'AUTH' in key or 'HEADER' in key)]
-            for value in sensitive:
-                assert value not in json.dumps(args,ensure_ascii=False),'凭据进入argv'
-                checked_secrets.append(value.encode())
-            renders+=1
+        target = row['target']
+        if target not in ('codex','claude'): continue
+        args=call('provider','render-args',target,row['id'])
+        values=call('provider','render-env',target,row['id'],'--format','json')
+        sensitive=[value for key,value in values.items() if len(value)>=8 and ('KEY' in key or 'TOKEN' in key or 'AUTH' in key or 'HEADER' in key)]
+        for value in sensitive:
+            assert value not in json.dumps(args,ensure_ascii=False),'凭据进入argv'
+            checked_secrets.append(value.encode())
+        renders+=1
     for path in root.rglob('*'):
         if path.is_file():
             content=path.read_bytes()

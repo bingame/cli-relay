@@ -15,7 +15,7 @@ import (
 )
 
 func sampleProvider() provider.Provider {
-	return provider.Provider{ID: "test-provider", DisplayName: "测试供应商", Targets: []string{"codex"}, BaseURL: "https://example.invalid/v1", Model: "test-model", Source: "manual"}
+	return provider.Provider{ID: "test-provider", DisplayName: "测试供应商", Target: "codex", BaseURL: "https://example.invalid/v1", Model: "test-model", Source: "manual"}
 }
 
 func renderTest(t *testing.T, a *Adapter, p provider.Provider) adapter.Artifact {

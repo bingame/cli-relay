@@ -19,7 +19,7 @@ func main() {
 	if name == "relay-codex" || name == "relay-claude" {
 		target := "codex"
 		if name == "relay-claude" {
-			target = "claude-code"
+			target = "claude"
 		}
 		args := []string{"exec", target}
 		if p := os.Getenv("RELAY_PROVIDER"); p != "" {

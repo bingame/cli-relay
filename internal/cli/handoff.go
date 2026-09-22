@@ -249,7 +249,7 @@ func (a *App) handoffExportCommand() *cobra.Command {
 				return e
 			}
 			if sourceProvider != "" {
-				values, e := a.providerSecretValues(cmd, sourceProvider)
+				values, e := a.providerSecretValues(cmd, target, sourceProvider)
 				if e != nil {
 					return fmt.Errorf("无法解锁来源凭据用于交接脱敏: %w", e)
 				}

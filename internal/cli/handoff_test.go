@@ -17,7 +17,7 @@ import (
 )
 
 func sampleDoc() []byte {
-	d := &handoff.Document{SchemaVersion: 1, SourceCLI: "claude-code", SourceProvider: "source", SourceSessionID: "session", GeneratedBy: "live-agent", GeneratedAt: time.Now().UTC().Format(time.RFC3339), Sections: map[string]string{}}
+	d := &handoff.Document{SchemaVersion: 1, SourceCLI: "claude", SourceProvider: "source", SourceSessionID: "session", GeneratedBy: "live-agent", GeneratedAt: time.Now().UTC().Format(time.RFC3339), Sections: map[string]string{}}
 	for _, s := range handoff.SectionTitles {
 		d.Sections[s] = "已确认的会话内容"
 	}
@@ -45,8 +45,8 @@ func TestHandoffLiveValidateContinueAndRawFallback(t *testing.T) {
 	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
 	home := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "prompt.txt")
-	ad := &mock.Adapter{Name: "claude-code", Resume: []string{"--resume"}, Inputs: adapter.LaunchInputs{Binary: os.Args[0], Args: []string{"-test.run=^TestCLIHandoffHelper$", "--"}, Env: map[string]string{"RELAY_CLI_HELPER": "1", "RELAY_CAPTURE_PROMPT": capture}}}
-	app := &App{Home: home, Adapters: map[string]adapter.LaunchAdapter{"claude-code": ad}}
+	ad := &mock.Adapter{Name: "claude", Resume: []string{"--resume"}, Inputs: adapter.LaunchInputs{Binary: os.Args[0], Args: []string{"-test.run=^TestCLIHandoffHelper$", "--"}, Env: map[string]string{"RELAY_CLI_HELPER": "1", "RELAY_CAPTURE_PROMPT": capture}}}
+	app := &App{Home: home, Adapters: map[string]adapter.LaunchAdapter{"claude": ad}}
 	run := func(input string, args ...string) (string, error) {
 		cmd := NewRootWithApp(app)
 		cmd.SetArgs(args)
@@ -58,12 +58,12 @@ func TestHandoffLiveValidateContinueAndRawFallback(t *testing.T) {
 		return out.String(), e
 	}
 	for _, id := range []string{"source", "summary"} {
-		if _, e := run("unusual-opaque-source-key", "provider", "add", "--id", id, "--target", "claude-code", "--api-key-stdin"); e != nil {
+		if _, e := run("unusual-opaque-source-key", "provider", "add", "--id", id, "--target", "claude", "--api-key-stdin"); e != nil {
 			t.Fatal(e)
 		}
 	}
 	docPath := filepath.Join(t.TempDir(), "handoff.md")
-	if _, e := run(string(sampleDoc()), "handoff", "export", "--cli", "claude-code", "--input", "-", "-o", docPath); e != nil {
+	if _, e := run(string(sampleDoc()), "handoff", "export", "--cli", "claude", "--input", "-", "-o", docPath); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := run("", "handoff", "schema", "--validate", docPath); e != nil {
@@ -79,10 +79,10 @@ func TestHandoffLiveValidateContinueAndRawFallback(t *testing.T) {
 	rawPath := filepath.Join(t.TempDir(), "session.jsonl")
 	_ = os.WriteFile(rawPath, []byte(`{"type":"user","message":{"role":"user","content":"继续实现；unusual-opaque-source-key"}}`+"\n{truncated"), 0600)
 	dir, _ := os.Getwd()
-	if e := process.SaveSession(home, process.Session{CLI: "claude-code", Provider: "source", SessionID: "session", WorkDir: dir}); e != nil {
+	if e := process.SaveSession(home, process.Session{CLI: "claude", Provider: "source", SessionID: "session", WorkDir: dir}); e != nil {
 		t.Fatal(e)
 	}
-	out, e := run("", "handoff", "export", "--cli", "claude-code", "--session", "session", "--dead", "--raw-file", rawPath, "--summary-provider", "summary")
+	out, e := run("", "handoff", "export", "--cli", "claude", "--session", "session", "--dead", "--raw-file", rawPath, "--summary-provider", "summary")
 	if e != nil {
 		t.Fatal(e)
 	}

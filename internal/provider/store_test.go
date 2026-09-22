@@ -3,7 +3,6 @@ package provider
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,11 +19,11 @@ func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {
 		t.Fatal(e)
 	}
 	ctx := context.Background()
-	p := Provider{ID: "provider-a", DisplayName: "测试", Targets: []string{"codex"}, Source: "manual"}
+	p := Provider{ID: "provider-a", DisplayName: "测试", Target: "codex", Source: "manual"}
 	if e = s.Import(ctx, []Entry{{Provider: p, Secrets: map[string]string{"api_key": "dummy-secret-no-plaintext"}}}, "hash", []byte("mcp-dummy-token")); e != nil {
 		t.Fatal(e)
 	}
-	sec, e := s.Secrets(ctx, p.ID)
+	sec, e := s.Secrets(ctx, p.Target, p.ID)
 	if e != nil || sec["api_key"] != "dummy-secret-no-plaintext" {
 		t.Fatal(e)
 	}
@@ -55,62 +54,6 @@ func TestStoreEncryptedImportAndAtomicConflict(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesLegacySchema(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "providers.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`CREATE TABLE providers (id TEXT PRIMARY KEY,display_name TEXT NOT NULL,targets TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT); CREATE TABLE import_log(id INTEGER PRIMARY KEY,source TEXT,file_hash TEXT,imported_at TEXT,raw_snapshot BLOB);`)
-	db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(root, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	if err := store.Add(context.Background(), Provider{ID: "legacy", DisplayName: "旧供应商", Targets: []string{"codex"}}, nil); err != nil {
-		t.Fatal(err)
-	}
-	p, err := store.Get(context.Background(), "legacy")
-	if err != nil || p.EffectiveStatus() != "active" || p.EffectiveSecretMode() != "callback" {
-		t.Fatal("旧库迁移失败", err)
-	}
-}
-
-// 老库的 provider_models 没有思考档位列；迁移必须补列并把旧行读成"未声明"，
-// 不能让 NULL 把 Models 的扫描打断。
-func TestOpenMigratesLegacyModelColumns(t *testing.T) {
-	root := t.TempDir()
-	db, err := sql.Open("sqlite", filepath.Join(root, "providers.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`CREATE TABLE providers (id TEXT PRIMARY KEY,display_name TEXT NOT NULL,targets TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT,secret_mode TEXT NOT NULL DEFAULT 'callback',status TEXT NOT NULL DEFAULT 'active',content_hash TEXT);
-CREATE TABLE provider_models(provider_id TEXT NOT NULL,model_id TEXT NOT NULL,display_name TEXT,context_window INTEGER,is_default INTEGER NOT NULL DEFAULT 0,sort_order INTEGER,PRIMARY KEY(provider_id,model_id));
-INSERT INTO providers(id,display_name,targets,extra_json,source) VALUES('legacy','旧供应商','["codex"]','{}','cc-switch-import');
-INSERT INTO provider_models(provider_id,model_id,display_name,context_window,is_default,sort_order) VALUES('legacy','old-model','旧模型',128000,1,0);`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	store, err := Open(root, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	models, err := store.Models(context.Background(), "legacy")
-	if err != nil {
-		t.Fatal("旧库迁移后模型目录读取失败", err)
-	}
-	if len(models) != 1 || models[0].ModelID != "old-model" || models[0].ContextWindow != 128000 || len(models[0].ReasoningLevels) != 0 || models[0].DefaultReasoningLevel != "" {
-		t.Fatalf("旧条目未按未声明档位读回: %+v", models)
-	}
-}
-
 func TestStoreRoundTripsModelReasoningLevels(t *testing.T) {
 	root := t.TempDir()
 	store, err := Open(root, nil)
@@ -119,7 +62,7 @@ func TestStoreRoundTripsModelReasoningLevels(t *testing.T) {
 	}
 	defer store.Close()
 	ctx := context.Background()
-	p := Provider{ID: "provider-a", DisplayName: "测试", Targets: []string{"codex"}, Source: "cc-switch-import", Model: "m-b"}
+	p := Provider{ID: "provider-a", DisplayName: "测试", Target: "codex", Source: "cc-switch-import", Model: "m-b"}
 	entry := Entry{Provider: p, Models: []Model{
 		{ProviderID: p.ID, ModelID: "m-a", DisplayName: "A", ReasoningLevels: []string{"none", "low"}, DefaultReasoningLevel: "low", SortOrder: 0},
 		{ProviderID: p.ID, ModelID: "m-b", IsDefault: true, SortOrder: 1},
@@ -127,7 +70,7 @@ func TestStoreRoundTripsModelReasoningLevels(t *testing.T) {
 	if err = store.Import(ctx, []Entry{entry}, "", nil); err != nil {
 		t.Fatal(err)
 	}
-	models, err := store.Models(ctx, p.ID)
+	models, err := store.Models(ctx, p.Target, p.ID)
 	if err != nil || len(models) != 2 {
 		t.Fatal("模型目录写入失败", err)
 	}
@@ -142,7 +85,7 @@ func TestStoreRoundTripsModelReasoningLevels(t *testing.T) {
 	if err = store.Upsert(ctx, entry); err != nil {
 		t.Fatal(err)
 	}
-	models, err = store.Models(ctx, p.ID)
+	models, err = store.Models(ctx, p.Target, p.ID)
 	if err != nil || len(models[0].ReasoningLevels) != 0 || models[0].DefaultReasoningLevel != "" {
 		t.Fatal("清空档位后旧值残留", err)
 	}
@@ -150,15 +93,78 @@ func TestStoreRoundTripsModelReasoningLevels(t *testing.T) {
 
 func TestProviderRejectsTraversalAndCredentialURLs(t *testing.T) {
 	for _, id := range []string{"../evil", "..", "a/b", `a\b`} {
-		p := Provider{ID: id, DisplayName: "n", Targets: []string{"codex"}}
+		p := Provider{ID: id, DisplayName: "n", Target: "codex"}
 		if p.Validate() == nil {
 			t.Fatal(id)
 		}
 	}
 	for _, url := range []string{"https://user:pass@example.test", "https://example.test?key=secret", "file:///etc/passwd"} {
-		p := Provider{ID: "ok", DisplayName: "n", Targets: []string{"codex"}, BaseURL: url}
+		p := Provider{ID: "ok", DisplayName: "n", Target: "codex", BaseURL: url}
 		if p.Validate() == nil {
 			t.Fatal(url)
 		}
+	}
+}
+
+// 供应商身份是 (target, id)：不同 CLI 允许同 ID、同显示名称；同一 CLI 内名称唯一。
+func TestStoreAllowsSameNameAcrossTargets(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	shared := "my-relay"
+	for _, target := range []string{"codex", "claude"} {
+		p := Provider{ID: shared, DisplayName: "My Relay", Target: target, Source: "manual"}
+		if err = store.Add(ctx, p, nil); err != nil {
+			t.Fatalf("不同 CLI 的同名供应商应可共存: %v", err)
+		}
+	}
+	if err = store.Add(ctx, Provider{ID: shared, DisplayName: "My Relay", Target: "codex"}, nil); err == nil {
+		t.Fatal("同一 CLI 的重复名称应被拒绝")
+	}
+	codex, err := store.Get(ctx, "codex", shared)
+	if err != nil || codex.Target != "codex" {
+		t.Fatal("按 target 读取失败", err)
+	}
+	for _, target := range []string{"codex", "claude"} {
+		items, err := store.List(ctx, target)
+		if err != nil || len(items) != 1 || items[0].Target != target {
+			t.Fatalf("List(%s) 过滤失败: %+v %v", target, items, err)
+		}
+	}
+}
+
+// 导入路径使用 Upsert：同一 target 内，同名但不同 ID 的既有记录
+// 也应被直接覆盖（用户要求「不用考虑 ID 冲突，直接覆盖」，与 cc-switch 一致）。
+func TestStoreUpsertOverwritesSameNameInTarget(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	old := Provider{ID: "old-id", DisplayName: "My Relay", Target: "codex", BaseURL: "https://old.example.invalid/v1", Source: "manual"}
+	if err = store.Add(ctx, old, nil); err != nil {
+		t.Fatal(err)
+	}
+	// 新记录：ID 不同、显示名相同、base_url 不同。Upsert 应删掉 old-id 并写入 new-id。
+	replacement := Entry{Provider: Provider{ID: "new-id", DisplayName: "My Relay", Target: "codex", BaseURL: "https://new.example.invalid/v1", Source: "cc-switch-import"}}
+	if err = store.Upsert(ctx, replacement); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, "codex", "new-id")
+	if err != nil || got.BaseURL != "https://new.example.invalid/v1" || got.DisplayName != "My Relay" {
+		t.Fatalf("覆盖后应读取到 new-id: %+v %v", got, err)
+	}
+	if _, err = store.Get(ctx, "codex", "old-id"); err == nil {
+		t.Fatal("同名不同 ID 的旧记录应被覆盖移除")
+	}
+	items, err := store.List(ctx, "codex")
+	if err != nil || len(items) != 1 || items[0].ID != "new-id" {
+		t.Fatalf("覆盖后 codex 应只剩一条 new-id: %+v %v", items, err)
 	}
 }
