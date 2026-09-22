@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,8 +44,11 @@ func TestParseRealisticDump(t *testing.T) {
 		t.Fatal("Claude secrets were not preserved")
 	}
 	settings := claude.Provider.Extra["claude_settings"].(map[string]any)
-	if settings["env"].(map[string]any)["SAFE_FLAG"] != "yes" || settings["permissions"] == nil {
+	if settings["env"].(map[string]any)["SAFE_FLAG"] != "yes" {
 		t.Fatal("nonsecret settings were lost")
+	}
+	if settings["permissions"] != nil || settings["hooks"] != nil {
+		t.Fatal("spec §6 白名单：permissions/hooks 等运行环境配置不应入库")
 	}
 	codex := result.Providers[1]
 	if codex.Provider.ID != "codex" || codex.Provider.BaseURL != "https://codex.example.test/v1" || codex.Provider.Model != "gpt-example" || !codex.Provider.Supports("codex") || codex.Current {
@@ -303,19 +307,22 @@ func TestSanitizeRetainsNumericTokenBudgetsAndExtractsCustomHeaders(t *testing.T
 
 func TestKnownCredentialsCannotBeCopiedToPublicConfiguration(t *testing.T) {
 	row := validRow()
-	row["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-known-value","OTHER_SECRET":"true"},"description":"uses fake-known-value","safe":"true","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo fake-known-value"},{"type":"command","command":"echo harmless"}]}]},"fake-known-value":"secret field name"}`
+	row["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-known-value","OTHER_SECRET":"true","SAFE_FLAG":"yes"},"description":"uses fake-known-value","safe":"true","hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo fake-known-value"},{"type":"command","command":"echo harmless"}]}]},"fake-known-value":"secret field name"}`
 	entry, err := parseEntry(row)
 	if err != nil {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(entry.Provider)
 	warnings, _ := json.Marshal(entry.Warnings)
-	if strings.Contains(string(encoded), "fake-known-value") || strings.Contains(string(warnings), "fake-known-value") || len(entry.Warnings) != 3 {
+	if strings.Contains(string(encoded), "fake-known-value") || strings.Contains(string(warnings), "fake-known-value") || len(entry.Warnings) != 0 {
 		t.Fatal("known credential survived public configuration filtering")
 	}
 	settings := entry.Provider.Extra["claude_settings"].(map[string]any)
-	if settings["safe"] != "true" || !strings.Contains(string(encoded), "echo harmless") {
-		t.Fatal("short noncredential environment values caused unrelated data loss")
+	if settings["env"].(map[string]any)["SAFE_FLAG"] != "yes" {
+		t.Fatal("白名单应保留 env 中的非凭据语义字段")
+	}
+	if settings["safe"] != nil || settings["hooks"] != nil || settings["description"] != nil || strings.Contains(string(encoded), "echo harmless") {
+		t.Fatal("spec §6 白名单：hooks 等运行环境配置应整体剔除，含无害内容")
 	}
 	if !strings.Contains(entry.Secrets["source_settings"], "echo fake-known-value") {
 		t.Fatal("encrypted source backup lost original hook")
@@ -327,6 +334,52 @@ func TestKnownCredentialsCannotBeCopiedToPublicConfiguration(t *testing.T) {
 		if _, err := parseEntry(bad); err == nil || strings.Contains(err.Error(), "xyz") {
 			t.Fatal("public field containing a short primary credential was accepted or leaked")
 		}
+	}
+}
+
+func TestCredentialCopyInsideWhitelistedFieldIsStripped(t *testing.T) {
+	row := validRow()
+	row["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-known-value","SAFE_NOTE":"prefix fake-known-value suffix","SAFE_FLAG":"yes"}}`
+	entry, err := parseEntry(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := entry.Provider.Extra["claude_settings"].(map[string]any)["env"].(map[string]any)
+	if env["SAFE_FLAG"] != "yes" {
+		t.Fatal("无关字段被误删")
+	}
+	if env["SAFE_NOTE"] != nil || len(entry.Warnings) != 1 {
+		t.Fatal("白名单字段内的凭据副本未被剥离")
+	}
+	encoded, _ := json.Marshal(entry.Provider)
+	if strings.Contains(string(encoded), "fake-known-value") {
+		t.Fatal("凭据副本进入公开元数据")
+	}
+}
+
+func TestCodexConfigWhitelistDropsExecutionEnvironment(t *testing.T) {
+	row := validRow()
+	row["app_type"] = "codex"
+	row["settings_config"] = `{"config":"model_provider=\"p\"\nmodel=\"gpt-example\"\nsandbox_mode=\"workspace-write\"\napproval_policy=\"never\"\nshell_environment_policy={ inherit = \"all\" }\nmodel_reasoning_effort=\"high\"\n[model_providers.p]\nname=\"p\"\nbase_url=\"https://p.example.test/v1\"\nwire_api=\"responses\"\nrequest_max_retries=3\nexperimental_key=\"x\""}`
+	entry, err := parseEntry(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := entry.Provider.Extra["codex_config"].(map[string]any)
+	if config["model_provider"] != "p" || config["model"] != "gpt-example" || config["model_reasoning_effort"] != "high" {
+		t.Fatal("白名单应保留模型与供应商选择字段")
+	}
+	for _, key := range []string{"sandbox_mode", "approval_policy", "shell_environment_policy"} {
+		if config[key] != nil {
+			t.Fatalf("spec §6 白名单：%s 不应入库", key)
+		}
+	}
+	def := config["model_providers"].(map[string]any)["p"].(map[string]any)
+	if def["base_url"] != "https://p.example.test/v1" || def["request_max_retries"] != int64(3) {
+		t.Fatal("白名单应保留供应商连接字段")
+	}
+	if def["experimental_key"] != nil {
+		t.Fatal("供应商定义内的非白名单字段不应入库")
 	}
 }
 
@@ -405,6 +458,79 @@ func TestParseRealDumpStatistics(t *testing.T) {
 }
 
 const minimalSQL = `CREATE TABLE providers (id TEXT, app_type TEXT, name TEXT, settings_config TEXT, meta TEXT, is_current INTEGER);`
+
+func TestCodexModelCatalogImport(t *testing.T) {
+	row := validRow()
+	row["app_type"] = "codex"
+	row["settings_config"] = `{"auth":{"OPENAI_API_KEY":"fake-codex-key"},` +
+		`"config":"model_provider = \"custom\"\nmodel = \"gpt-6-astra\"\n[model_providers.custom]\nbase_url = \"https://gateway.example.test/v1\"\nwire_api = \"responses\"",` +
+		`"modelCatalog":{"models":[` +
+		`{"model":"deepseek-flash-latest","displayName":"DeepSeek Flash","contextWindow":256000,"reasoningLevels":["high","low","high"],"defaultReasoningLevel":"low"},` +
+		`{"model":" glm-flash-latest "},` +
+		`{"model":"deepseek-flash-latest"},` +
+		`{"model":""}]}}`
+	entry, err := parseEntry(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Provider.Model != "gpt-6-astra" {
+		t.Fatal("默认模型未从原生配置读取")
+	}
+	if len(entry.Models) != 2 {
+		t.Fatalf("模型映射未按 cc-switch 语义整理（空模型名与重复行应跳过）: %+v", entry.Models)
+	}
+	first := entry.Models[0]
+	if first.ModelID != "deepseek-flash-latest" || first.DisplayName != "DeepSeek Flash" || first.ContextWindow != 256000 || first.SortOrder != 0 {
+		t.Fatalf("模型映射可编辑字段未导入: %+v", first)
+	}
+	if !reflect.DeepEqual(first.ReasoningLevels, []string{"high", "low"}) || first.DefaultReasoningLevel != "low" {
+		t.Fatalf("思考档位未导入: %+v", first)
+	}
+	if first.IsDefault {
+		t.Fatal("默认模型不在映射中时不应把映射行当作默认")
+	}
+	second := entry.Models[1]
+	if second.ModelID != "glm-flash-latest" || second.DisplayName != "" || second.ContextWindow != 0 || second.SortOrder != 1 || len(second.ReasoningLevels) != 0 {
+		t.Fatalf("未声明字段不应编造: %+v", second)
+	}
+	// modelCatalog 是公开元数据；凭据不得混进来。
+	if encoded, _ := json.Marshal(entry.Provider); strings.Contains(string(encoded), "fake-codex-key") {
+		t.Fatal("模型目录泄漏了凭据")
+	}
+}
+
+// 回归：cc-switch 里「模型映射」留空的渠道在 Relay 侧不能凭空得到一份映射。
+// 旧实现用 provider.Model 伪造一条 provider_models，导致 Codex 的 /model 菜单被锁成单个模型。
+func TestImportDoesNotInventModelCatalog(t *testing.T) {
+	codexRow := validRow()
+	codexRow["app_type"] = "codex"
+	codexRow["settings_config"] = `{"config":"model_provider=\"custom\"\nmodel = \"gpt-6-astra\"\n[model_providers.custom]\nbase_url=\"https://gateway.example.test/v1\"\nwire_api=\"responses\""}`
+	entry, err := parseEntry(codexRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Provider.Model != "gpt-6-astra" || len(entry.Models) != 0 {
+		t.Fatalf("未声明模型映射的 Codex 渠道不得生成模型目录: %+v", entry.Models)
+	}
+	// 空 modelCatalog 与键缺失同样是"没有声明"。
+	codexRow["settings_config"] = `{"config":"model = \"gpt-6-astra\"","modelCatalog":{"models":[]}}`
+	entry, err = parseEntry(codexRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entry.Models) != 0 {
+		t.Fatalf("空模型映射不得生成模型目录: %+v", entry.Models)
+	}
+	claudeRow := validRow()
+	claudeRow["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-claude-key","ANTHROPIC_MODEL":"claude-opus-5"}}`
+	entry, err = parseEntry(claudeRow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Provider.Model != "claude-opus-5" || len(entry.Models) != 0 {
+		t.Fatalf("Claude Code 的模型映射走 env，不应另造模型目录: %+v", entry.Models)
+	}
+}
 
 func validRow() map[string]any {
 	return map[string]any{"id": "test", "app_type": "claude", "name": "测试", "settings_config": "{}", "meta": "{}", "is_current": int64(0)}

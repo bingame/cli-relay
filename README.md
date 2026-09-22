@@ -125,7 +125,7 @@ unset RELAY_INPUT_KEY
 | `handoff export --cli <cli> --dead --session <id> [-o <path>]` | 官方结构化读取/恢复，失败后原始文件解析与模型总结 |
 | `handoff continue --doc <path> [--cli <cli>] [--provider <id>] [--exec]` | 新会话注入文档，单独再次强调硬约束 |
 
-不指定 provider 时使用该 CLI 的 current；没有 current 时沿用原生 CLI 默认配置。`--` 后参数由原生 CLI 消费。无头模式会补齐必要输出标志；冲突输出格式报错。Codex 的 `app-server` 保持双向协议并返回原生退出码，由 Multica 处理交互和重试。
+不指定 provider 时使用该 CLI 的 current；没有 current 时沿用原生 CLI 默认配置。所有接受供应商的参数（`--provider`、`switch`、`remove`、`render-args/render-env`、`secret get`）同时接受 **ID 或显示名称**；显示名称重名时报错并列出候选 ID。这些参数支持 shell 补全（`relay completion bash|zsh|fish|powershell` 生成脚本）。`--` 后参数由原生 CLI 消费。无头模式会补齐必要输出标志；冲突输出格式报错。Codex 的 `app-server` 保持双向协议并返回原生退出码，由 Multica 处理交互和重试。
 
 普通 `exec`：`0` 成功，`10` 可重试的基础设施故障，`11` 需要人工回答，`12` 历史损坏/恢复被拒绝，其他非零为未分类错误。Relay 不自动回答问题。分类依赖上游事件及错误文字，不声称覆盖所有未来版本。
 
@@ -140,6 +140,8 @@ relay run claude-code --provider example -- --append-system-prompt-file ./CLAUDE
 导入的非敏感 Claude settings 经渲染文件传入；API key 和自定义敏感 header 只通过环境注入。`switch` 用 `.relay-managed.json` 记录管理字段，保留其他用户字段，发现管理字段被手工改动时拒绝覆盖。
 
 Codex 默认使用 `-c` 内联非敏感供应商定义，未执行 switch 也可临时运行。可选 `--codex-launch-mode profile` 或 `RELAY_CODEX_LAUNCH_MODE=profile`；需先 switch 安装独立 profile。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
+
+**模型映射只在供应商真的声明过时才生效**：从 cc-switch 导入时，只有源里的「模型映射」非空才会写入 `provider_models`，进而在 Codex 侧渲染 `model_catalog_json`、在 Claude Code 侧渲染 `modelPicker`；没有声明就不渲染任何模型列表，把模型发现交回 CLI 原生机制（Codex 自己拉 `/v1/models`，Claude Code 用内置菜单与原生环境变量）。手工 `provider add --model X` 属于用户显式声明，会写入一条模型记录。逐模型可编辑的字段与 cc-switch 一致：Codex 是显示名、请求模型、上下文窗口、思考档位；Claude Code 是显示名、请求模型、1M 上下文与默认兜底模型。
 
 `switch` 不把密钥写入原生配置。需要 Relay 保存的凭据时，应通过 `relay run/exec` 启动，或把 `render-env` 输出交给受信任的调用进程；单独启动原生 CLI 不会自动从 Relay 解密密钥。
 

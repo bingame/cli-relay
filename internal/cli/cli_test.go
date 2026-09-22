@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/bingame/cli-relay/internal/adapter"
 	"github.com/bingame/cli-relay/internal/adapter/mock"
 	"github.com/bingame/cli-relay/internal/provider"
+	"github.com/spf13/cobra"
 )
 
 func command(t *testing.T, home, input string, args ...string) (string, error) {
@@ -24,6 +26,95 @@ func command(t *testing.T, home, input string, args ...string) (string, error) {
 	e := cmd.Execute()
 	return out.String(), e
 }
+func TestProviderResolutionByDisplayName(t *testing.T) {
+	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
+	root := t.TempDir()
+	native := t.TempDir()
+	t.Setenv("CODEX_HOME", native)
+	add := func(id, name string) {
+		t.Helper()
+		args := []string{"provider", "add", "--id", id, "--target", "codex", "--base-url", "https://example.test/v1"}
+		if name != "" {
+			args = append(args, "--name", name)
+		}
+		if _, e := command(t, root, "dummy-secret-"+id, append(args, "--api-key-stdin")...); e != nil {
+			t.Fatal(e)
+		}
+	}
+	add("one", "友好渠道")
+	add("two", "dup")
+	add("three", "dup")
+	if _, e := command(t, root, "", "switch", "友好渠道", "--target", "codex"); e != nil {
+		t.Fatal("显示名称 switch 失败", e)
+	}
+	state, e := command(t, root, "", "status")
+	if e != nil || !strings.Contains(state, `"codex": "one"`) {
+		t.Fatal(state, e)
+	}
+	if _, e = command(t, root, "", "provider", "render-args", "codex", "友好渠道"); e != nil {
+		t.Fatal("显示名称 render-args 失败", e)
+	}
+	if _, e = command(t, root, "", "switch", "dup"); e == nil || !strings.Contains(e.Error(), "three") || !strings.Contains(e.Error(), "two") {
+		t.Fatal("重名应报错并列出候选 ID", e)
+	}
+	if _, e = command(t, root, "", "provider", "remove", "友好渠道"); e == nil || !strings.Contains(e.Error(), "全局默认引用") {
+		t.Fatal("激活供应商应拒绝删除", e)
+	}
+	if _, e = command(t, root, "", "provider", "remove", "不存在的供应商"); e == nil || !strings.Contains(e.Error(), "未找到供应商") {
+		t.Fatal("不存在应报未找到", e)
+	}
+	if _, e = command(t, root, "", "provider", "remove", "three"); e != nil {
+		t.Fatal("按 ID 删除失败", e)
+	}
+}
+
+func TestProviderCompletionCandidates(t *testing.T) {
+	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	add := func(id, name string, targets ...string) {
+		t.Helper()
+		args := []string{"provider", "add", "--id", id, "--base-url", "https://example.test/v1", "--api-key-stdin"}
+		for _, target := range targets {
+			args = append(args, "--target", target)
+		}
+		if name != "" {
+			args = append(args, "--name", name)
+		}
+		if _, e := command(t, root, "dummy-secret-"+id, args...); e != nil {
+			t.Fatal(e)
+		}
+	}
+	add("one", "友好渠道", "codex")
+	add("two", "spaced name", "codex")
+	add("three", "claude-only", "claude-code")
+	app := &App{Home: root}
+	cmd := NewRootWithApp(app)
+	cmd.SetContext(context.Background())
+	out, directive := app.completeProviders("codex")(cmd, nil, "")
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatal("补全应禁止文件补全")
+	}
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "one\t友好渠道") || !strings.Contains(joined, "友好渠道\tone") {
+		t.Fatal("缺少 ID 与显示名称候选", out)
+	}
+	if !strings.Contains(joined, "two\tspaced name") || strings.Contains(joined, "spaced name\ttwo") {
+		t.Fatal("含空白的显示名称不应成为候选", out)
+	}
+	if strings.Contains(joined, "three") {
+		t.Fatal("target 过滤失效", out)
+	}
+	out, _ = app.completeProviderArg()(cmd, []string{"codex"}, "")
+	if strings.Join(out, "\n") == "" {
+		t.Fatal("位置参数补全为空")
+	}
+	out, _ = app.completeProviders("")(cmd, nil, "")
+	if !strings.Contains(strings.Join(out, "\n"), "three") {
+		t.Fatal("不过滤 target 时应包含全部供应商", out)
+	}
+}
+
 func TestProviderAddRenderSwitchAndIsolation(t *testing.T) {
 	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
 	root := t.TempDir()

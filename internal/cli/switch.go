@@ -7,7 +7,7 @@ import (
 
 func (a *App) switchCommand() *cobra.Command {
 	var target string
-	cmd := &cobra.Command{Use: "switch <provider_id>", Short: "合并原生配置并更新各 CLI 默认供应商", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "switch <provider>", Short: "合并原生配置并更新各 CLI 默认供应商", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		unlock, e := a.lock(cmd.Context())
 		if e != nil {
 			return e
@@ -18,7 +18,7 @@ func (a *App) switchCommand() *cobra.Command {
 			return e
 		}
 		defer s.Close()
-		p, e := s.Get(cmd.Context(), args[0])
+		p, e := a.resolveProvider(cmd.Context(), s, args[0])
 		if e != nil {
 			return e
 		}
@@ -62,5 +62,12 @@ func (a *App) switchCommand() *cobra.Command {
 		return outputJSON(cmd, current)
 	}}
 	cmd.Flags().StringVar(&target, "target", "", "只切换指定 CLI")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		filter, _ := cmd.Flags().GetString("target")
+		return a.completeProviders(filter)(cmd, args, toComplete)
+	}
 	return cmd
 }

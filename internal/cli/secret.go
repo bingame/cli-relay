@@ -9,7 +9,7 @@ import (
 func (a *App) secretCommand() *cobra.Command {
 	parent := &cobra.Command{Use: "secret", Short: "供原生 CLI 回调读取凭据"}
 	get := &cobra.Command{
-		Use:   "get <cli> <provider_id>",
+		Use:   "get <cli> <provider>",
 		Short: "仅向标准输出写入供应商密钥",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -26,7 +26,7 @@ func (a *App) secretCommand() *cobra.Command {
 				return err
 			}
 			defer store.Close()
-			p, err := store.Get(cmd.Context(), args[1])
+			p, err := a.resolveProvider(cmd.Context(), store, args[1])
 			if err != nil {
 				return err
 			}
@@ -48,6 +48,7 @@ func (a *App) secretCommand() *cobra.Command {
 			return err
 		},
 	}
+	get.ValidArgsFunction = a.completeProviderArg()
 	parent.AddCommand(get)
 	return parent
 }

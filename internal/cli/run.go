@@ -39,10 +39,11 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 			return process.Options{}, e
 		}
 		defer s.Close()
-		p, e := s.Get(cmd.Context(), id)
+		p, e := a.resolveProvider(cmd.Context(), s, id)
 		if e != nil {
 			return process.Options{}, e
 		}
+		id = p.ID
 		if !p.Supports(target) {
 			return process.Options{}, fmt.Errorf("供应商不支持目标 CLI")
 		}
@@ -147,7 +148,14 @@ func (a *App) launchCommand(mode adapter.Mode) *cobra.Command {
 		}
 		return nil
 	}}
-	cmd.Flags().StringVar(&id, "provider", "", "本次使用的供应商（不修改默认）")
+	cmd.Flags().StringVar(&id, "provider", "", "本次使用的供应商 ID 或显示名称（不修改默认）")
+	_ = cmd.RegisterFlagCompletionFunc("provider", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		target := ""
+		if len(args) > 0 {
+			target = args[0]
+		}
+		return a.completeProviders(target)(cmd, args, toComplete)
+	})
 	return cmd
 }
 
@@ -169,7 +177,11 @@ func (a *App) providerSecretValues(cmd *cobra.Command, id string) ([]string, err
 		}
 		s.SetCipher(v)
 	}
-	values, e := s.Secrets(cmd.Context(), id)
+	p, e := a.resolveProvider(cmd.Context(), s, id)
+	if e != nil {
+		return nil, e
+	}
+	values, e := s.Secrets(cmd.Context(), p.ID)
 	if e != nil {
 		return nil, e
 	}

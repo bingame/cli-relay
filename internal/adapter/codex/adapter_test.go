@@ -84,7 +84,10 @@ func TestNativeConfigMappingAndCredentialRejection(t *testing.T) {
 		"approval_policy": "never", "shell_environment_policy": map[string]any{"inherit": "all"},
 		"model_providers": map[string]any{"original": map[string]any{"name": "上游名称", "base_url": "https://old.invalid", "wire_api": "responses", "request_max_retries": int64(3), "env_key": "OLD_KEY", "query_params": map[string]any{"api-version": "2026-01"}, "env_http_headers": map[string]any{"Authorization": "EXTRA_AUTH"}}},
 	}}
+	// BuildLaunchInputs 会安装 profile；NativeHome 必须隔离到临时目录，
+	// 否则测试会写到用户真实的 $CODEX_HOME。
 	a := New()
+	a.NativeHome = t.TempDir()
 	artifact := renderTest(t, a, p)
 	config := decodeTOML(t, artifact.Content)
 	id, _ := names(p.ID)

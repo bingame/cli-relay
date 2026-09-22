@@ -1,6 +1,36 @@
 # 实现与验收记录
 
-日期：2026-09-17；最近更新：2026-09-20。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+日期：2026-09-17；最近更新：2026-09-22。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+
+## 2026-09-22：模型目录只承载真实声明，两侧对齐（Spec v0.10）
+
+- 现象（用户反馈）：cc-switch 里「模型映射」留空的渠道，经 Relay 启动后模型仍被映射/锁死，例：Codex 的 `axonhub-any`。
+- 根因三处（都是把「默认模型」当成「模型目录」）：导入器在无 `modelCatalog` 时用 `Provider.Model` 伪造一条 `provider_models`；CodexAdapter 渲染条件是 `len(models) > 0 || p.Model != ""`；ClaudeCodeAdapter 无条件写 `modelPicker`（`replaceBuiltInOptions: true` 等于替换内置菜单）。
+- 修正：`provider_models` 只承载源里真实声明的模型目录，为空就不渲染任何目录类字段——导入器删除伪造分支、按 `settings_config.modelCatalog` 逐条导入；CodexAdapter 改为 `if len(models) > 0` 才写 `model_catalog_json`（不写时 Codex 自己拉 `/v1/models`，与 cc-switch「模型映射留空就不生成 catalog」一致）；ClaudeCodeAdapter 同样加 gating，模型选择交回原生菜单与 `ANTHROPIC_DEFAULT_*` 环境变量。`relay provider add --model X` 仍写入一条记录，属于用户显式声明，是刻意保留的非对称。
+- 新增 `provider_models` 列 `reasoning_levels`、`default_reasoning_level`（含 `ALTER TABLE` 迁移），对齐 cc-switch「模型映射」里用户可编辑的思考档位：渲染时按 Codex canonical 顺序（`none<minimal<low<medium<high<xhigh<max<ultra`）替换条目的支持档位、丢弃未知值，默认档走「声明 → 模板默认 → 最高」三级回落。spec §5.2.1 首次写明「可编辑字段边界」（Codex：显示名/请求模型/上下文窗口/思考档位；Claude Code：显示名/请求模型/1M 上下文/默认兜底模型），其余字段沿用 CLI 原生默认值，Relay 不提供编辑面。
+- 测试：`TestImportDoesNotInventModelCatalog`、`TestCodexModelCatalogImport`（trim/去重/逐列还原）、`TestCatalogSkippedWithoutDeclaredModels`、`TestCatalogHonorsPerModelReasoningLevels`、`TestOpenMigratesLegacyModelColumns`、`TestStoreRoundTripsModelReasoningLevels`。
+- 测试卫生修复：`TestNativeConfigMappingAndCredentialRejection` 与 `checkAdapterIntegration` 此前会写用户真实 `$CODEX_HOME`（安装 profile + 管理块），现均隔离到 `t.TempDir()`。修复前后用 `ls ~/.codex/*.config.toml ~/.codex/config.toml ~/.claude/settings.json | md5sum` 比对确认为同一哈希，`go test ./...` 不再触碰真实 HOME。
+- 存量数据：Relay 库中已导入的记录若模型目录是被伪造出来的，需重新导入才会消失（重导会按真实 `modelCatalog` 重写记录与产物）。
+- 验收：`go test ./...`、`go build ./...`、`go vet ./...` 全过；真实导出（用户 dump，只读）经 `TestRealDumpAdapterIntegration` 验证 10 条供应商及冲突改名版本，产物与 argv 无明文凭据。
+
+## 2026-09-22：Codex 模型目录（`model_catalog_json`）按 Codex 原生 schema 重写（Spec v0.9）
+
+- 现象：`relay run codex --provider axonhub-codex` 在 codex-cli 0.155.1 上 `Error loading configuration: failed to parse model_catalog_json path ...: missing field `slug``。根因是渲染的 catalog 用了 Relay 自拟结构（只有模型 ID），而该文件是 Codex 的完整模型定义目录。
+- 实测确定契约：必需字段 `slug`/`display_name`/`supported_reasoning_levels`/`shell_type`/`visibility`/`supported_in_api`/`priority`/`support_verbosity`/`truncation_policy`/`experimental_supported_tools` + `base_instructions`（或 `model_messages.instructions_template`）；条目是 slug 的替代、无内置继承；设置该文件后 Codex 不再拉取 `/v1/models`；供应商网关实测 `GET /v1/models` 返回 200（26 个模型，仅一次 GET，未打印密钥）。
+- 新增 `internal/adapter/codex/catalog.go`：内置中性模板（形态与 cc-switch 为非官方模型生成的 `cc-switch-model-catalog.json` 一致，`shell_type = "shell_command"`，不声明 `apply_patch_tool_type`/`web_search_tool_type`/`tools`/`model_messages`，避免第三方 `/responses` 网关拒绝 freeform `apply_patch`），逐模型克隆并覆写 `slug`/`display_name`/`description`/`context_window`/`max_context_window`/`priority`（`1000 + 序号`）；供应商默认模型始终入目录；profile 声明的 `model_reasoning_effort` 并入该条目的支持档位；渲染前逐条自检必需字段，无可渲染模型时不写 catalog 也不设该配置项。
+- 测试：`internal/adapter/codex/catalog_test.go` 覆盖原生字段形态、不含 freeform 工具声明、默认模型必在目录内、上下文窗口优先级（模型记录 > `codex_config` > 128000）、推理档位补齐与未知档位忽略、条目独立性、重复/空模型整理、无可用模型时不写 catalog、缺字段拒绝渲染。
+- 端到端复核：用真实库中的 `axonhub-codex` 记录跑 `Render` + `BuildLaunchInputs`，产出的 profile/catalog 交给本机 `codex.exe`（仅把 `base_url` 指向本地假服务、`auth.command` 换成占位环境变量，未请求真实网关、未使用真实凭据）：退出 0、`turn.completed`、`model=gpt-6-astra`、`reasoning.effort=low`、instructions 117 字符、工具集无 `apply_patch`。
+- 本次未做的：`/v1/models` 拉取与模型同步（用户明确选择"只修 catalog"）。当时的现状是 `provider_models` 里有什么就渲染什么，未导入模型列表的供应商只渲染 `provider.Model` 一条——**该行为已在同日 v0.10 修正**：未声明模型目录的供应商不再渲染目录（见上一节）。
+- 验收：`go test ./...`、`go vet ./...` 全过。
+
+## 2026-09-21：Spec v0.8 增量（导入白名单落地 + 供应商名称解析与补全）
+
+- 落地 v0.7 §6 第 4 步白名单：导入侧 `extra.claude_settings` 只保留 `env`、`extra.codex_config` 只保留 Adapter 消费的字段（本地维护与 adapter/codex 的 `providerFields`/`profileFields` 一致的键集，注释互相指向）；渲染侧 ClaudeCodeAdapter 不再以整份 `claude_settings` 为基底，只取 `env`。permissions/hooks/statusLine/sandbox_mode 等不再入库、不进渲染产物，原始内容仍在加密的 `source_settings` 快照。
+- 存量数据边界：白名单只影响新导入；v0.6 之前以 cc-switch UUID 为 ID 的旧库按用户决定清库重导，不提供迁移命令（spec v0.8 已记录该边界）。
+- 新增 `internal/cli/resolve.go`：所有接受供应商的参数（`--provider`、`switch`、`remove`、`render-args/render-env`、`secret get`，含 handoff 的 `--provider`/`--summary-provider`）同时接受 ID 或显示名称，ID 精确优先、名称重名报错列候选；并为这些参数注册 cobra 动态补全（ID 与无空白显示名称互为候选，失败静默 `NoFileComp`）。
+- 补全函数防御：未执行命令上 `cmd.Context()` 为 nil 会让 `database/sql` panic 并在 defer Close 死锁，补全路径显式回退 `context.Background()`（单测直接调用补全函数复现后修复）。
+- 测试：导入白名单（hooks/permissions 剔除、env 保留、白名单字段内凭据副本仍剥离）、Codex 执行环境字段剔除、Adapter 渲染白名单消费、ApplyGlobal 用户修改旧字段保留（改用 env 字段表达，原依赖 permissions 透传）、名称解析（ID/名称/重名/未找到/激活保护）、补全候选与 target 过滤。
+- 验收：`go test ./...`、`go vet ./...`、`git diff --check` 全过；隔离 RELAY_HOME 端到端：`provider import` 得友好 slug ID，`provider list` 输出仅含白名单字段，`switch`/`render-args` 按显示名称工作，未找到时给出可操作建议。
 
 ## 2026-09-20：Spec v0.7 增量
 

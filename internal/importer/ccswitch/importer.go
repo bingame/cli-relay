@@ -382,7 +382,8 @@ func parseEntry(row map[string]any) (Entry, error) {
 		entry.Provider.BaseURL = firstString(env["ANTHROPIC_BASE_URL"], settings["base_url"])
 		entry.Provider.Model = firstString(env["ANTHROPIC_MODEL"], settings["model"])
 		entry.Secrets["api_key"] = firstString(env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_API_KEY"], settings["api_key"])
-		entry.Provider.Extra["claude_settings"] = sanitize(settings, "", entry.Secrets)
+		cleaned, _ := sanitize(settings, "", entry.Secrets).(map[string]any)
+		entry.Provider.Extra["claude_settings"] = claudeSettingsWhitelist(cleaned)
 		if picker, ok := settings["modelPicker"].(map[string]any); ok {
 			if options, ok := picker["options"].([]any); ok {
 				for i, raw := range options {
@@ -433,7 +434,11 @@ func parseEntry(row map[string]any) (Entry, error) {
 			sanitize(map[string]any{"env": env}, "", entry.Secrets)
 		}
 		moveCodexHeaders(config, entry.Provider.ID, env, entry.Secrets)
-		entry.Provider.Extra["codex_config"] = sanitize(config, "", entry.Secrets)
+		codexCleaned, _ := sanitize(config, "", entry.Secrets).(map[string]any)
+		entry.Provider.Extra["codex_config"] = codexConfigWhitelist(codexCleaned)
+		// 模型目录只能来自用户真实声明的「模型映射」；没有声明就不导入任何条目，
+		// 由 Adapter 决定"不渲染目录"，把模型列表交回目标 CLI（见 codexCatalogModels）。
+		entry.Models = append(entry.Models, codexCatalogModels(settings["modelCatalog"], entry.Provider.Model)...)
 	default:
 		// 不支持的 target 保留全量加密源数据，不生成可误用的原生配置。
 		entry.Secrets["api_key"] = firstString(settings["api_key"])
@@ -442,9 +447,6 @@ func parseEntry(row map[string]any) (Entry, error) {
 	if entry.Secrets["api_key"] == "" {
 		delete(entry.Secrets, "api_key")
 	}
-	if entry.Provider.Model != "" && len(entry.Models) == 0 {
-		entry.Models = []provider.Model{{ProviderID: entry.Provider.ID, ModelID: entry.Provider.Model, IsDefault: true}}
-	}
 	if err := removeCredentialCopies(&entry); err != nil {
 		return Entry{}, err
 	}
@@ -452,6 +454,160 @@ func parseEntry(row map[string]any) (Entry, error) {
 		return Entry{}, errors.New("供应商 ID、目标或 base_url 无效；URL 不能含凭据或查询参数")
 	}
 	return entry, nil
+}
+
+// spec §6 导入白名单：只入库用户级语义字段。Claude Code 的
+// permissions/hooks/statusLine 等运行环境配置属于 Relay 全局配置，不随
+// provider 走；被剔除的内容仍完整保留在加密的 source_settings 快照中。
+var claudeSettingsKeys = map[string]bool{"env": true}
+
+func claudeSettingsWhitelist(settings map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range settings {
+		if claudeSettingsKeys[key] {
+			out[key] = value
+		}
+	}
+	return out
+}
+
+// 与 codex Adapter 消费的白名单保持一致（adapter/codex 的
+// providerFields/profileFields）；shell_environment_policy/sandbox_mode/
+// approval_policy 等执行环境策略不导入。
+var codexProfileKeys = map[string]bool{
+	"model": true, "model_reasoning_effort": true, "model_reasoning_summary": true,
+	"model_verbosity": true, "model_context_window": true, "model_auto_compact_token_limit": true,
+	"model_supports_reasoning_summaries": true,
+}
+
+var codexProviderKeys = map[string]bool{
+	"name": true, "base_url": true, "wire_api": true, "requires_openai_auth": true,
+	"env_key_instructions": true, "query_params": true, "env_http_headers": true,
+	"request_max_retries": true, "stream_max_retries": true, "stream_idle_timeout_ms": true,
+	"supports_websockets": true, "websocket_connect_timeout_ms": true,
+}
+
+func codexConfigWhitelist(config map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range config {
+		switch {
+		case codexProfileKeys[key] || key == "model_provider":
+			out[key] = value
+		case key == "model_providers":
+			defs, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			clean := map[string]any{}
+			for name, raw := range defs {
+				def, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				filtered := map[string]any{}
+				for k, v := range def {
+					if codexProviderKeys[k] {
+						filtered[k] = v
+					}
+				}
+				clean[name] = filtered
+			}
+			out[key] = clean
+		}
+	}
+	return out
+}
+
+// codexCatalogModels 读取 cc-switch 的 Codex「模型映射」（settings_config.modelCatalog.models）。
+// 该键**只在用户填过映射时才存在**（留空即不写），所以「键缺失 → 返回空目录」不是
+// 丢失数据，而是必须保持的语义：没有声明映射的渠道不能凭空获得一份映射。
+// 逐行只取 cc-switch UI 里真正可编辑的四列（显示名、请求模型、上下文窗口、思考等级）；
+// 系统提示词、输入模态、并行工具调用等字段在 cc-switch 侧也是模板默认值，Relay
+// 侧同样交给中性模板/目标 CLI 原生默认值，不再逐行存储。
+func codexCatalogModels(value any, defaultModel string) []provider.Model {
+	catalog, _ := value.(map[string]any)
+	rows, _ := catalog["models"].([]any)
+	models := make([]provider.Model, 0, len(rows))
+	seen := map[string]bool{}
+	for _, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		modelID := strings.TrimSpace(firstString(row["model"]))
+		if modelID == "" || seen[modelID] {
+			continue // 与 cc-switch 一致：空模型名和重复行直接跳过，不报错。
+		}
+		seen[modelID] = true
+		models = append(models, provider.Model{
+			ModelID:               modelID,
+			DisplayName:           strings.TrimSpace(firstString(row["displayName"], row["display_name"])),
+			ContextWindow:         catalogInt(row["contextWindow"], row["context_window"]),
+			ReasoningLevels:       catalogReasoningLevels(row["reasoningLevels"], row["reasoning_levels"]),
+			DefaultReasoningLevel: firstString(row["defaultReasoningLevel"], row["default_reasoning_level"]),
+			IsDefault:             modelID == defaultModel,
+			SortOrder:             len(models),
+		})
+	}
+	return models
+}
+
+// catalogReasoningLevels 保留源侧原样声明（只去空去重），未知档位留给
+// Adapter 渲染时按 Codex 官方档位表过滤，避免在导入期静默丢掉用户输入。
+func catalogReasoningLevels(values ...any) []string {
+	for _, value := range values {
+		items, ok := value.([]any)
+		if !ok {
+			continue
+		}
+		levels := make([]string, 0, len(items))
+		seen := map[string]bool{}
+		for _, item := range items {
+			level, ok := item.(string)
+			if !ok {
+				continue
+			}
+			level = strings.TrimSpace(level)
+			if level == "" || seen[level] {
+				continue
+			}
+			seen[level] = true
+			levels = append(levels, level)
+		}
+		if len(levels) > 0 {
+			return levels
+		}
+	}
+	return nil
+}
+
+// catalogInt 兼容 JSON 解出的 float64、SQLite 往返的整数与字符串写法。
+func catalogInt(values ...any) int64 {
+	for _, value := range values {
+		switch number := value.(type) {
+		case float64:
+			if number > 0 && number == float64(int64(number)) {
+				return int64(number)
+			}
+		case int64:
+			if number > 0 {
+				return number
+			}
+		case int:
+			if number > 0 {
+				return int64(number)
+			}
+		case json.Number:
+			if parsed, err := number.Int64(); err == nil && parsed > 0 {
+				return parsed
+			}
+		case string:
+			if parsed, err := strconv.ParseInt(strings.TrimSpace(number), 10, 64); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return 0
 }
 
 // 已知凭据可能再次出现在 hooks.command 等普通文本中；禁止其进入公开元数据。
@@ -475,6 +631,10 @@ func removeCredentialCopies(entry *Entry) error {
 	}
 	public := []string{entry.Provider.ID, entry.OriginalID, entry.Provider.DisplayName, entry.Provider.BaseURL, entry.Provider.Model}
 	public = append(public, entry.Provider.Targets...)
+	for _, model := range entry.Models {
+		// 模型目录同样会渲染进公开配置产物和 provider show 输出。
+		public = append(public, model.ModelID, model.DisplayName)
+	}
 	for _, value := range public {
 		if contains(value) {
 			return errors.New("供应商公开字段包含已识别凭据，拒绝导入")

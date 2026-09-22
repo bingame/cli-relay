@@ -1,6 +1,14 @@
-# Relay 技术规格说明书 v0.7
+# Relay 技术规格说明书 v0.10
+
+> **v0.10 变更（模型目录只承载真实声明）**：真实使用中发现"cc-switch 里模型映射留空的渠道，经 Relay 启动后模型却被映射/锁死"（如 Codex 的 `axonhub-any`）。根因是三处把「默认模型」当成了「模型目录」：导入器用 `provider.Model` 伪造一条 `provider_models`、CodexAdapter 以 `len(models) > 0 || p.Model != ""` 为渲染条件、ClaudeCodeAdapter 无条件写 `modelPicker`。现统一收敛为 **`provider_models` 只承载源里真实声明的模型目录，为空就不渲染任何目录类字段**（§3.1 / §5.1 / §5.2 / §6）。同时按 cc-switch 的界面把模型目录的**可编辑字段边界**写进 spec（Codex：显示名/请求模型/上下文窗口/思考档位；Claude Code：显示名/请求模型/1M 上下文/默认兜底模型，见 §5.2.1），`provider_models` 因此新增 `reasoning_levels`、`default_reasoning_level` 两列与逐模型的档位渲染规则。
+
+> **v0.9 变更（Codex 模型目录实测修正）**：
 
 > 一句话定位：Relay 是一个本地优先的命令行工具，负责「用哪个供应商/哪份配置启动哪个 AI Agent CLI」以及「一段会话如何在供应商/CLI 之间语义交接」，不重新实现任务队列/自动重试（那是 Multica 等编排器的职责），但提供干净的集成点供它们调用。
+
+> **v0.9 变更（Codex 模型目录实测修正）**：§5.2 此前把 `model_catalog_json` 当作"由 `provider_models` 渲染而来的模型列表"一笔带过，实现据此写出 Relay 自拟的 JSON 结构，结果 Codex 0.155.1 直接拒绝启动（`failed to parse model_catalog_json path ...: missing field `slug``）。实测（二进制字符串挖掘 + 本地假服务逐项探针）确认它是 **Codex 自己的完整模型定义目录**：顶层 `{"models": [...]}`，每条必须带 `slug`/`display_name`/`supported_reasoning_levels`/`shell_type`/`visibility`/`supported_in_api`/`priority`/`support_verbosity`/`truncation_policy`/`experimental_supported_tools` 以及 `base_instructions`（或 `model_messages.instructions_template`），且条目是对该 slug 的**替代**而非补充（没有内置继承，漏写提示词就是真没有提示词）。§5.2 现已写明完整条目形态、中性模板来源（与 cc-switch 为第三方模型生成的目录同形）、不声明 freeform 工具（第三方 `/responses` 网关会拒绝 `type=="custom"` 的 `apply_patch`）以及渲染前自检要求。详细实证记录见 `internal/adapter/codex/NOTES.md`。
+
+> **v0.8 变更（回应真实使用反馈）**：① 落地 §6 第 4 步的导入白名单——此前实现把 cc-switch 整条 settings 脱敏后全量塞进 `extra_json`，导致 `provider list` 输出混入 hooks/permissions/statusLine 等运行环境配置，且 ClaudeCodeAdapter 以整份 `claude_settings` 为渲染基底、把这些字段写进渲染产物，与 §6 矛盾。现在导入侧与渲染侧都只消费白名单语义字段（Claude Code 侧 `extra.claude_settings` 仅保留 `env`；Codex 侧 `extra.codex_config` 仅保留 Adapter 消费的 `model_provider`/profile 字段与 `model_providers` 定义内的供应商字段），被剔除的内容仍完整保留在加密的 `source_settings` 快照中。② §4 所有接受供应商的参数同时接受 **ID 或显示名称**（ID 精确匹配优先；名称重名时报错并列出候选 ID），并为这些参数提供 shell 补全（cobra 动态候选）。早期实现（v0.6 之前）把 cc-switch 上游 UUID 直接当作 provider ID 入库的存量数据，覆盖匹配会保留旧 ID（§6 设计），需要清库重导才能拿到友好 slug——这是已知的存量数据边界，不为此新增迁移命令。
 
 > **v0.7 变更（合并在线讨论稿，并以 cc-switch 当前源码复核）**：§6 不再把本 spec 中出现过的 `providers` 列名当成上游契约。实现导入器时，必须直接对照所支持 cc-switch 版本的 `src-tauri/src/database/schema.rs`（必要时连同迁移/导出代码），或者在重建出的临时数据库上执行 `PRAGMA table_info(providers)` 现场探测；查询和字段映射由探测结果生成。早期草稿中的列名、列顺序和示例 `SELECT` 均不得作为实现依据。
 
@@ -112,12 +120,17 @@ CREATE TABLE providers (
 );
 
 -- 模型目录: 对应 Codex 的 model_catalog_json 与 Claude Code 的 modelPicker.options,
--- 两者本质是同一个概念(自定义模型列表+展示名), 提升为一等数据, 由各 Adapter 自行渲染成目标格式
+-- 两者本质是同一个概念(自定义模型列表+展示名), 提升为一等数据, 由各 Adapter 自行渲染成目标格式。
+-- 列的范围**刻意对齐 cc-switch「模型映射」表里用户能编辑的那几列**（显示名、请求模型、
+-- 上下文窗口、思考等级），其余字段（系统提示词、输入模态、并行工具调用等）目标 CLI 都有自己的
+-- 原生默认值，Relay 不编造，也不提供编辑入口——见 §5.2「可编辑字段边界」。
 CREATE TABLE provider_models (
     provider_id    TEXT NOT NULL,
     model_id       TEXT NOT NULL,        -- 如 "deepseek-v4-flash"
     display_name   TEXT,
     context_window INTEGER,
+    reasoning_levels       TEXT,         -- JSON 数组, 供应商声明的思考档位; NULL/空串 = 未声明
+    default_reasoning_level TEXT,        -- 供应商声明的默认档位; 空 = 未声明
     is_default     BOOLEAN DEFAULT 0,
     sort_order     INTEGER,
     PRIMARY KEY (provider_id, model_id)
@@ -182,6 +195,8 @@ relay handoff continue --doc <path> --cli <cli> [--provider <id>]
 relay handoff schema                                # 打印/校验 Handoff Doc 的 JSON Schema，供 Skill 引用
 ```
 
+所有接受供应商的参数（`--provider`、`switch`、`provider remove`、`render-args/render-env`、`secret get` 的 `<provider_id>`）同时接受 **ID 或显示名称**：ID 精确匹配优先；仅按显示名称命中时若重名，报错并列出候选 ID。这些参数提供 shell 补全（动态列出本地库中的 ID 与显示名称，失败时静默降级），`relay completion <shell>` 输出启用脚本。
+
 退出码约定（供 `exec` 和外层编排器消费，见 §8.3）：`0` 成功；`10` 可重试的基础设施错误；`11` 检测到需要人类介入（如触发了 AskUserQuestion 类工具）；`12` 会话历史损坏需要冷启动重试；其余非零为未分类错误。
 
 ---
@@ -226,6 +241,7 @@ Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不
   }
   ```
   `env` 块里**只放 `ANTHROPIC_BASE_URL`（非凭据，不参与优先级竞争）**，不放任何密钥字段，密钥完全交给 `apiKeyHelper` 回调 `relay secret get`。
+- **`modelPicker` 只在供应商**声明过**模型目录（`provider_models` 非空）时才写**：`replaceBuiltInOptions: true` 语义是「替换内置模型菜单」，给一个从未声明模型列表的中转渠道（如 cc-switch 里「模型映射」留空的渠道）凭空造一份单条 `modelPicker`，等于把"任意模型都能用"的渠道锁成一个模型——这正是本版修正的用户可见缺陷（见 §5.2 同类 gating）。未声明时 Relay 不写该字段，模型选择交回 Claude Code 原生机制（内置菜单 + `extra.claude_settings.env` 里透传的 `ANTHROPIC_DEFAULT_*_MODEL` 等变量，cc-switch 用的也是这套）。
 - `relay secret get claude-code <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
 - 刷新间隔默认 5 分钟（`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` 可调），与 Codex 的 `refresh_interval_ms` 默认值（300000ms）刚好对称，两个 Adapter 的密钥回调设计可以共享同一套心智模型。
 - `env_key`/明文写入 `env` 块的方式依然作为可选降级路径保留（`secret_mode = "env_inline"`），供不方便跑回调命令的场景使用；此时 `renders()` 产出的 settings 文件里才会真正含有明文，需要 `0600` 权限保护。
@@ -265,9 +281,30 @@ Codex 支持三种密钥来源（官方文档确认），Relay 只使用前两�
    ```toml
    model_provider     = "<id>"
    model               = "<model>"
-   model_catalog_json  = "~/.relay/rendered/codex/<id>.catalog.json"   # 由 provider_models 渲染而来
+   model_catalog_json  = "~/.relay/rendered/codex/<id>.catalog.json"   # 仅当供应商声明过模型目录时才写
    ```
+   **`model_catalog_json` 是条件字段：只有 `provider_models` 非空（供应商真的声明过「模型映射」）时才写。** 设置该项后 Codex 不再拉取 provider 的 `/v1/models`，所以给一个没声明过模型目录的渠道造一份单条目录，会让本来"任意模型都能用"的渠道退化成只有一个可用模型（cc-switch 的语义与此一致：模型映射留空就不生成 catalog 文件、不设 `model_catalog_json`，让 Codex 自己发现模型列表）。Relay 早期实现对此有三个错误，现全部修正：Adapter 侧不再以 `provider.Model != ""` 作为渲染条件；导入器侧不再用 `Provider.Model` 伪造一条 `provider_models` 记录（下游"凭空多出模型映射"的根因）；`provider add --model X` 仍会写入一条模型记录，属于**用户显式声明**，是刻意的非对称，不视为缺陷。
    **`<id>` 这个 slug 在 Relay 里被有意统一成三件事共用**：Relay 自己的 provider id、`model_providers.<id>` 的 id、以及这个 profile 文件名——这三者在 Codex 官方语义里本来是互相独立的命名空间，Relay 为了减少心智负担才把它们收敛成一个，不是 Codex 的强制要求。
+
+   **`<id>.catalog.json` 的格式是 Codex 自己的完整模型定义目录，不是 Relay 自拟的"模型 ID 列表"**（0.155.1 实测：写成数组/自定义 schema 会在启动时报 `missing field `slug``）。顶层形态 `{"models": [ ... ]}`，每个条目至少要带 `slug`、`display_name`、`supported_reasoning_levels`、`shell_type`、`visibility`、`supported_in_api`、`priority`、`support_verbosity`、`truncation_policy`、`experimental_supported_tools`，并且必须给出 `base_instructions` 或 `model_messages.instructions_template`——**条目是对该 slug 的完整替代，没有内置继承**，不写提示词就等于该模型没有系统提示词。因此 Relay 不拼装"精简条目"，而是内置一份中性模板（与 cc-switch 为第三方模型生成的 `cc-switch-model-catalog.json` 同形），逐模型克隆后只覆写 `slug`/`display_name`/`description`/`context_window`/`max_context_window`/`priority`，并保证 profile 里声明的 `model_reasoning_effort` 出现在该条目的支持档位内：
+
+   **逐模型思考档位（`provider_models.reasoning_levels` / `default_reasoning_level`）**：供应商为该模型声明过档位时，条目里的 `supported_reasoning_levels` 由声明值替换（只保留 Codex 认识的 `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`/`ultra`，按从低到高排序，未知值丢弃），`default_reasoning_level` 取「声明的默认档位 → 模板默认档位（若仍在支持集内）→ 支持集里最高档」三级回落。未声明档位时保留模板默认。这是与 cc-switch 逐条对齐的行为，避免把上游只支持 high/medium 的模型渲染成 Codex 眼里的全档位模型。
+
+
+   ```jsonc
+   { "models": [
+     { "slug": "<model_id>", "display_name": "<显示名或 model_id>", "description": "...",
+       "base_instructions": "You are Codex, a coding agent. ...",   // 中性提示词, 不自带官方内容
+       "supported_reasoning_levels": [ { "effort": "none", ... }, { "effort": "high", ... } ],
+       "default_reasoning_level": "high",
+       "shell_type": "shell_command",                                 // 见下方 freeform 工具说明
+       "visibility": "list", "supported_in_api": true, "priority": 1000, // 1000 + 序号, 不遮挡内置模型
+       "support_verbosity": false, "truncation_policy": { "mode": "bytes", "limit": 10000 },
+       "experimental_supported_tools": [], "context_window": 128000, "max_context_window": 128000 }
+   ] }
+   ```
+
+   两条硬约束写进实现：**条目里不声明 `apply_patch_tool_type`/`web_search_tool_type`/`tools`/`model_messages`**（第三方 `/responses` 网关会拒绝 `type=="custom"` 的 freeform `apply_patch`；用 `shell_type = "shell_command"` 走命令式改动，这也正是 cc-switch 的做法）；**渲染前逐条自检必需字段**，宁可报错也不写出 Codex 会拒绝加载的目录。另外 `provider.Model`（供应商默认模型）无论是否在 `provider_models` 里都必须出现在目录中，否则 profile 指向的是 Codex 眼里的未知模型。上下文窗口优先级：`provider_models.context_window` > `Extra.codex_config.model_context_window` > 128000。
 
    **继承机制已确认**：Codex 的配置是分层覆盖（overlay）——先加载 `$CODEX_HOME/config.toml`，再加载 `$CODEX_HOME/<id>.config.toml`，profile 文件里的同名字段覆盖主配置，未出现的字段（比如 `model_providers.<id>` 整块）直接继承主配置。所以 profile 文件**不需要重复声明** `[model_providers.<id>]`，`render()` 只需要写一份进主配置文件即可，不用再冗余写两份（这一点是通过 Codex 官方助手的回答确认的，不是静态文档页面的直接引用，实现时建议保留一次快速冒烟测试作为廉价的二次确认，但不必再默认冗余写入）。
 
@@ -275,10 +312,21 @@ Codex 支持三种密钥来源（官方文档确认），Relay 只使用前两�
 - 新增子命令 `relay secret get <cli> <provider_id>`：只做一件事——从加密存储解出明文，仅打印到 stdout，不打印任何其他内容，不写日志、不落文件；Claude Code 和 Codex 共用同一个实现（见 §5.1），因为二者的回调契约本质相同（跑一个命令、拿 stdout 当凭据）。
 - 好处：渲染出来的全局 profile 是**自包含的**，用户不经过 `relay run/exec`、直接 `codex --profile <id>` 也能正常工作，因为密钥回调不依赖 Relay 是不是那个 spawn 者；同时因为产物不含明文，§5.4 的持久化缓存策略对 Codex（以及默认配置下的 Claude Code）不需要考虑"密钥留存时长"这个顾虑，可以放心一直缓存。
 - `env_key` 降级路径（可选，用户主动要求时启用）：产出 `env_key = "RELAY_<ID>_KEY"`（不含明文），`buildLaunchInputs()` 才需要现算 `env = { "RELAY_<ID>_KEY": <明文> }` 注入子进程；**必须验证** `RELAY_<ID>_KEY` 出现在 Codex 自己的 `shell_environment_policy`/env allowlist 里，若 Codex 版本要求显式声明允许的变量名前缀，需在 `applyGlobal()` 时一并写入这条配置，并在集成测试里覆盖「设置了变量但 Codex 读不到」这个已知坑。`auth.command`/`env_key`/`experimental_bearer_token` 三者互斥，不能同时配置（官方文档明确要求），Relay 也明确不生成 `experimental_bearer_token`。
-- **额外发现的功能性差异（不只是安全考虑）**：部分 OpenAI 兼容中转站文档提到，用 `env_key` 模式时 Codex 不会主动拉取该 provider 的模型目录，非官方模型会出现"Unknown model"警告；用 `auth.command` 模式则没有这个问题。Relay 因为自己用 `provider_models` 管理模型目录、渲染成 `model_catalog_json`，不依赖 Codex 主动拉取，所以这一点对 Relay 不是刚需，但作为默认选 `auth.command` 的又一个佐证列在这里。
+- **额外发现的功能性差异（不只是安全考虑）**：部分 OpenAI 兼容中转站文档提到，用 `env_key` 模式时 Codex 不会主动拉取该 provider 的模型目录，非官方模型会出现"Unknown model"警告；用 `auth.command` 模式则没有这个问题。Relay 因为自己能声明模型目录（供应商真的给出「模型映射」时渲染成 `model_catalog_json`；未给出时交给 Codex 自己发现），不依赖 Codex 主动拉取，所以这一点对 Relay 不是刚需，但作为默认选 `auth.command` 的又一个佐证列在这里。
 - `buildLaunchInputs()`（两种密钥模式通用）：`argv = ["--profile", id]`（现已确认对应 `$CODEX_HOME/<id>.config.toml` 这个独立文件，见上方产物结构说明）。
 - `applyGlobal()`（对应 `switch`，与 `run`/`exec` 走的路径不同）：把 `[model_providers.<id>]`（含 `.auth`）写/更新进主配置文件 `~/.codex/config.toml` 的注册表部分（这一步 `switch`/`run`/`exec` 都需要，保证 provider 已定义），然后**额外在主配置文件顶层直接设置 `model_provider = "<id>"`、`model = "<model>"`**——这才是真正"不带任何 flag 直接跑 `codex` 也生效"的全局默认，和 `run`/`exec` 用的 `--profile` 选择器文件是两条不同路径，不要合并成一个。
 - `resumeArgs(id)`：视 Codex 当前版本的 resume 子命令语法而定（`exec resume <id>` 或 `--resume <id>`），实现前需在目标 Codex 版本上验证一次，不要假设语法长期不变。**同时注意 §0.1 第 1 点的结论：跨 provider 场景下即使拿到了正确的 resume 语法，也应默认走 Handoff 而非直接 resume，resumeArgs 主要服务于同 provider 内的场景和 Handoff 第 2 级 fallback。**
+
+### 5.2.1 模型目录的可编辑字段边界（与 cc-switch 对齐）
+
+Relay 只承载**用户能编辑的那几列**，其余一律交给目标 CLI 的原生默认值，不提供编辑入口、也不在渲染时编造。依据 cc-switch 的模型映射界面：
+
+| Target | 用户可编辑 |
+|---|---|
+| Codex | 显示名、请求模型（`model_id`）、上下文窗口、思考档位（`reasoning_levels` + 默认档位） |
+| Claude Code | 显示名、请求模型、是否声明支持 1M 上下文、默认兜底模型（`ANTHROPIC_DEFAULT_*_MODEL`，走 `env` 透传） |
+
+Codex 侧的 `base_instructions`（系统提示词）、`input_modalities`、`supports_parallel_tool_calls` 等条目字段属于 cc-switch 内部模板/预设，不是逐条可编辑项，Relay 同样只从内置中性模板继承、不新增配置面。这条边界是本版新增内容的取舍依据：**宁可少一个字段，也不要造出上游没有的语义**。
 
 ### 5.3 密钥永不进入 argv
 两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见）。允许的载体只有：(a) 文件内容（`env_inline`/`env_key` 降级路径下的渲染文件，权限 `0600`）；(b) 直接注入子进程环境变量表（`env_key` 降级路径）；(c) 通过 `relay secret get` 的 stdout 管道直传给调用它的进程（**两个 Adapter 的默认路径**——Claude Code 走 `apiKeyHelper`，Codex 走 `auth.command`，这是三者里暴露面最小的一种，因为不经过任何持久化环境变量表，也不落任何配置文件）。
@@ -319,6 +367,7 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 4. 对每一行，**按白名单只提取"用户级"语义字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走。以下描述的是要提取的**语义**，不是对 cc-switch 物理列名或 JSON 键名的固定声明；实际取值路径必须来自第 3 步的源码核对或现场探测：
    - provider 所属应用类型 → 映射到 Relay 的 `targets`（`claude` → `claude-code`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
    - provider 的设置载荷 → 按其实际格式反序列化，再提取基础 URL、API 密钥（→ `provider_secrets`，立刻加密，不落中间文件）、默认模型和模型目录等白名单语义；模型目录写入 `provider_models` 表，不塞进 `extra_json`（见 §3.1 变更）。载荷内部键名同样以所支持 cc-switch 版本的实际源码/数据为准，不沿用早期草稿中的名称猜测。
+   - **模型目录只承载源里真实声明的「模型映射」**（Codex 侧是 `settings_config.modelCatalog` 的非空 `models` 数组；Claude Code 侧是其原生模型声明字段）。源里没有声明就必须**一条 `provider_models` 记录都不写入**——`provider.Model`（默认模型）不是模型目录，不得用它伪造记录，否则下游 Adapter 会因"目录非空"而渲染出 `model_catalog_json`/`modelPicker`，把"任意模型"渠道锁死（见 §5.2 gating）。逐条导入的字段限于显示名、模型 ID、上下文窗口、思考档位与默认档位；模型 ID 与显示名需按 cc-switch 的行为做 trim 后去重、跳过空值，默认档位取自源里的默认模型标记。
    - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配范围仅限本地 `source = "cc-switch-import"` 的记录**——`source = "manual"` 的记录永远不参与这次匹配，即使 `(target, slugify(display_name))` 完全相同也不会被当作"已存在"，导入器会把它当新记录处理（见下方 ID 生成规则）。这不是遗漏，是和第 6 步"manual 记录永远不受清理逻辑影响"同一条原则的延伸：cc-switch 触发的自动化流程不应该静默覆盖用户手工维护的配置，宁可多出一条肉眼可见、可自行合并的重复记录，也不要静默覆盖看不见的手工字段。命中已有的 `cc-switch-import` 记录后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
      - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。

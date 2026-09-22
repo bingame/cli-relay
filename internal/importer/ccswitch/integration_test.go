@@ -68,7 +68,11 @@ func TestClaudeAPIKeyOnlyAdapterIntegration(t *testing.T) {
 
 func checkAdapterIntegration(t *testing.T, result *Result) int {
 	t.Helper()
-	adapters := map[string]adapter.LaunchAdapter{"claude-code": claudecode.New(), "codex": codex.New()}
+	// Codex 的 BuildLaunchInputs 会安装 profile，NativeHome 必须隔离到临时目录，
+	// 否则集成测试会写进用户真实的 $CODEX_HOME（config.toml + <id>.config.toml）。
+	codexAdapter := codex.New()
+	codexAdapter.NativeHome = t.TempDir()
+	adapters := map[string]adapter.LaunchAdapter{"claude-code": claudecode.New(), "codex": codexAdapter}
 	root := t.TempDir()
 	checked := 0
 	for index, entry := range result.Providers {

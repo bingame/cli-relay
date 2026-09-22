@@ -26,13 +26,21 @@ type Provider struct {
 	UpdatedAt   string         `json:"updated_at,omitempty"`
 }
 
+// Model 是供应商声明的模型目录条目（spec §3.1）。字段范围刻意对齐 cc-switch
+// 「模型映射」里用户能编辑的那几列：显示名、请求模型、上下文窗口、思考等级；
+// 其余字段（系统提示词、输入模态、并行工具调用）目标 CLI 都有自己的原生默认值，
+// 不由 Relay 编造。
 type Model struct {
 	ProviderID    string `json:"provider_id"`
 	ModelID       string `json:"model_id"`
 	DisplayName   string `json:"display_name,omitempty"`
 	ContextWindow int64  `json:"context_window,omitempty"`
-	IsDefault     bool   `json:"is_default,omitempty"`
-	SortOrder     int    `json:"sort_order,omitempty"`
+	// ReasoningLevels 是该模型声明的思考档位，留空表示沿用目标 CLI 的原生档位；
+	// DefaultReasoningLevel 只在两者同时声明时生效（Codex 的目录没有内置继承）。
+	ReasoningLevels       []string `json:"reasoning_levels,omitempty"`
+	DefaultReasoningLevel string   `json:"default_reasoning_level,omitempty"`
+	IsDefault             bool     `json:"is_default,omitempty"`
+	SortOrder             int      `json:"sort_order,omitempty"`
 }
 
 func (p Provider) EffectiveSecretMode() string {

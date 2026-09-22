@@ -94,6 +94,10 @@ func (a *App) handoffCommand() *cobra.Command {
 	cont.Flags().StringVar(&id, "provider", "", "目标供应商，优先目标 CLI 的 current")
 	cont.Flags().BoolVar(&headless, "exec", false, "通过受监管无头模式继续（支持长文档）")
 	_ = cont.MarkFlagRequired("doc")
+	_ = cont.RegisterFlagCompletionFunc("provider", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		target, _ := cmd.Flags().GetString("cli")
+		return a.completeProviders(target)(cmd, args, toComplete)
+	})
 	parent.AddCommand(schema, cont, a.handoffExportCommand())
 	return parent
 }
@@ -293,5 +297,12 @@ func (a *App) handoffExportCommand() *cobra.Command {
 	cmd.Flags().StringVar(&summaryCLI, "summary-cli", "", "降级总结使用的 CLI")
 	cmd.Flags().DurationVar(&timeout, "timeout", 2*time.Minute, "每次恢复/总结超时")
 	_ = cmd.MarkFlagRequired("cli")
+	_ = cmd.RegisterFlagCompletionFunc("summary-provider", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		target, _ := cmd.Flags().GetString("summary-cli")
+		if target == "" {
+			target, _ = cmd.Flags().GetString("cli")
+		}
+		return a.completeProviders(target)(cmd, args, toComplete)
+	})
 	return cmd
 }

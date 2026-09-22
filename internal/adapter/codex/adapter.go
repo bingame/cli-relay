@@ -214,17 +214,34 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 	if err := adapter.WriteRendered(path, content, sourceHash); err != nil {
 		return adapter.Artifact{}, err
 	}
+	// 只有供应商**声明过模型目录**（provider_models 非空）才写 model_catalog_json：
+	// 设置该配置项后 Codex 不再拉取 provider 的 /v1/models，凭空造一份单条目录会
+	// 把"任意模型"渠道锁死成一个模型。只有默认模型时交给 Codex 自己发现模型列表
+	// （与 cc-switch 一致：模型映射留空就不生成 catalog）。
 	if len(models) > 0 {
 		catalogPath := filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".catalog.json")
-		catalog := map[string]any{"models": models}
-		data, err := json.MarshalIndent(catalog, "", "  ")
+		catalog, err := buildCatalog(p, models)
 		if err != nil {
-			return adapter.Artifact{}, fmt.Errorf("无法生成 Codex 模型目录")
-		}
-		if err := adapter.WriteRendered(catalogPath, append(data, '\n'), sourceHash); err != nil {
 			return adapter.Artifact{}, err
 		}
-		profile["model_catalog_json"] = catalogPath
+		// 没有可用模型时宁可不写 catalog，也不交给 Codex 一个空目录。
+		if catalog != nil {
+			data, err := json.MarshalIndent(catalog, "", "  ")
+			if err != nil {
+				return adapter.Artifact{}, fmt.Errorf("无法生成 Codex 模型目录")
+			}
+			if err := adapter.WriteRendered(catalogPath, append(data, '\n'), sourceHash); err != nil {
+				return adapter.Artifact{}, err
+			}
+			profile["model_catalog_json"] = catalogPath
+		}
+	}
+	if _, ok := profile["model_catalog_json"]; !ok {
+		// 供应商不再声明模型目录（或目录空到无法渲染）时清掉上一次留下的 catalog
+		// 文件：产物目录是 Relay 自己的缓存，留着无人引用的旧目录只会误导排查。
+		if err := adapter.RemoveRendered(filepath.Join(relayRoot, "rendered", a.Target(), p.ID+".catalog.json")); err != nil {
+			return adapter.Artifact{}, fmt.Errorf("无法清理陈旧的 Codex 模型目录: %w", err)
+		}
 	}
 	return adapter.Artifact{Target: a.Target(), ProviderID: p.ID, Path: path, Content: content, EnvKey: envKey, Config: config, Profile: profile, SourceHash: sourceHash}, nil
 }

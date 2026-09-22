@@ -45,3 +45,16 @@ func WriteRendered(path string, content []byte, sourceHash string) error {
 	encoded, _ := json.Marshal(meta)
 	return safeio.WriteFile(metaPath, append(encoded, '\n'), 0600)
 }
+
+// RemoveRendered 清理某个渲染产物及其缓存元数据。用于产物形态变化后不再需要
+// 该文件的场景（如供应商不再声明模型目录，见 codex.Adapter.Render）；
+// 文件本就不存在不算失败。
+func RemoveRendered(path string) error {
+	var first error
+	for _, candidate := range []string{path, path + ".relay-cache.json"} {
+		if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) && first == nil {
+			first = err
+		}
+	}
+	return first
+}

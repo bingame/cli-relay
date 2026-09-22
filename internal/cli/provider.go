@@ -58,6 +58,8 @@ func (a *App) providerCommand() *cobra.Command {
 				return fmt.Errorf("供应商 ID 已存在: %s", p.ID)
 			}
 		}
+		// 手工 `provider add --model X` 是用户显式声明，写成一条模型目录记录；
+		// 这与导入路径"源里没声明就一条都不写"（spec §5.2）是刻意的非对称。
 		models := []provider.Model{}
 		if p.Model != "" {
 			models = append(models, provider.Model{ProviderID: p.ID, ModelID: p.Model, IsDefault: true})
@@ -100,36 +102,37 @@ func (a *App) providerCommand() *cobra.Command {
 		return outputJSON(cmd, p)
 	}}
 	list.Flags().StringVar(&target, "target", "", "按目标 CLI 筛选")
-	remove := &cobra.Command{Use: "remove <id>", Short: "删除未激活的供应商及加密凭据", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if !provider.ValidID(args[0]) {
-			return fmt.Errorf("无效供应商 ID")
-		}
+	remove := &cobra.Command{Use: "remove <provider>", Short: "删除未激活的供应商及加密凭据", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		unlock, e := a.lock(cmd.Context())
 		if e != nil {
 			return e
 		}
 		defer unlock()
-		current, e := a.current()
-		if e != nil {
-			return e
-		}
-		for _, id := range current {
-			if id == args[0] {
-				return fmt.Errorf("供应商仍被全局默认引用，请先 switch 到其他供应商")
-			}
-		}
 		s, e := a.store(cmd, false)
 		if e != nil {
 			return e
 		}
 		defer s.Close()
-		if e = s.Remove(cmd.Context(), args[0]); e != nil {
+		p, e := a.resolveProvider(cmd.Context(), s, args[0])
+		if e != nil {
+			return e
+		}
+		current, e := a.current()
+		if e != nil {
+			return e
+		}
+		for _, id := range current {
+			if id == p.ID {
+				return fmt.Errorf("供应商仍被全局默认引用，请先 switch 到其他供应商")
+			}
+		}
+		if e = s.Remove(cmd.Context(), p.ID); e != nil {
 			return e
 		}
 		for t := range a.Adapters {
-			paths := []string{filepath.Join(a.Home, "rendered", t, args[0]+".json")}
+			paths := []string{filepath.Join(a.Home, "rendered", t, p.ID+".json")}
 			if t == "codex" {
-				paths = []string{filepath.Join(a.Home, "rendered", t, args[0]+".toml.fragment"), filepath.Join(a.Home, "rendered", t, args[0]+".catalog.json")}
+				paths = []string{filepath.Join(a.Home, "rendered", t, p.ID+".toml.fragment"), filepath.Join(a.Home, "rendered", t, p.ID+".catalog.json")}
 			}
 			for _, path := range paths {
 				for _, candidate := range []string{path, path + ".relay-cache.json"} {
@@ -141,6 +144,7 @@ func (a *App) providerCommand() *cobra.Command {
 		}
 		return nil
 	}}
+	remove.ValidArgsFunction = a.completeProviders("")
 	prune := &cobra.Command{Use: "prune --hard", Short: "物理删除已禁用的供应商", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if !hardPrune {
 			return fmt.Errorf("必须显式指定 --hard")
@@ -321,7 +325,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 		name = "render-env"
 	}
 	format := "dotenv"
-	cmd := &cobra.Command{Use: name + " <cli> <provider_id>", Short: "输出原生启动片段；render-env 是敏感输出", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: name + " <cli> <provider>", Short: "输出原生启动片段；render-env 是敏感输出", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		if env && format != "dotenv" && format != "json" {
 			return fmt.Errorf("format 必须为 dotenv 或 json")
 		}
@@ -339,7 +343,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 			return e
 		}
 		defer s.Close()
-		p, e := s.Get(cmd.Context(), args[1])
+		p, e := a.resolveProvider(cmd.Context(), s, args[1])
 		if e != nil {
 			return e
 		}
@@ -402,5 +406,6 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 	if env {
 		cmd.Flags().StringVar(&format, "format", "dotenv", "dotenv 或 json（Multica 需要 json）")
 	}
+	cmd.ValidArgsFunction = a.completeProviderArg()
 	return cmd
 }

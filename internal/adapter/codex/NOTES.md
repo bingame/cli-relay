@@ -16,6 +16,23 @@
 - 旧语法 `include_only = ["PATH", "HOME"]` 仍可解析；当前推荐 `filters = { "RELAY_*" = "exclude" }`，不可在同一层混用 filters 和旧 exclude/include_only。
 - `scripts/probe_codex.py` 使用临时 CODEX_HOME、虚构密钥、127.0.0.1 SSE 假服务。三组实测均退出 0、捕获正确 Authorization、产生 turn.completed：`-c` + shell inherit=none/include_only、独立 profile 文件、filters 排除 RELAY_*。未请求真实服务。
 
+## 模型目录（model_catalog_json）实测（2026-09-22）
+
+`model_catalog_json` **不是"模型 ID 列表"，而是一份完整的模型定义目录**：把它当数组写会在启动时直接报错。
+
+- 报错实证（codex-cli 0.155.1）：`failed to parse model_catalog_json path ...: missing field `slug` at line 7 column 5`。
+- 每条目必需字段：`slug`、`display_name`、`supported_reasoning_levels`、`shell_type`、`visibility`、`supported_in_api`、`priority`、`support_verbosity`、`truncation_policy`、`experimental_supported_tools`，并且必须给出 `base_instructions` 或 `model_messages.instructions_template`（两者都缺时报 `missing field `base_instructions``）。
+- **目录条目是该 slug 的替代，没有内置继承**：给出 `slug = "gpt-6-astra"` + 空 `base_instructions` 时，请求里的 instructions 就是空的；省略 `base_instructions` 则直接拒绝加载。所以自定义条目的提示词要么自备，要么显式引用 `model_messages`。
+- 顶层形态为 `{"models": [ ... ]}`；`codex debug models --bundled` 在 0.155.1 上 34ms 导出 443829 字节、9 个条目（每条 instructions 12896–21261 字符），可作模板来源，但 Relay 不内置官方提示词副本。
+- 设置了 `model_catalog_json` 后，Codex **不会**再去拉取 provider 的 `/v1/models`；不设置时，`auth.command` 模式会发 `GET /v1/models?client_version=0.155.1` 并回落到内置通用提示词（17174 字符，以 "You are a coding agent running in the Codex CLI," 开头），`env_key` 模式不拉取。
+- 第三方 `/responses` 网关会拒绝 Codex 的 freeform `apply_patch`（`type=="custom"`）工具，因此 Relay 的目录条目不声明 `apply_patch_tool_type` / `web_search_tool_type` / `tools` / `model_messages`，改用 `shell_type = "shell_command"`。这与 cc-switch（`E:\GitHubNew\cc-switch`，`src-tauri/src/resources/codex_native_responses_template.json` 与 `codex_config.rs` 的 `codex_catalog_model_entry`）做法一致：cc-switch 为每个非官方模型克隆中性模板、覆写 slug/display_name/description/context_window/priority(1000+序号)，并把 `base_instructions` 保留为一句中性描述。
+- Relay 的实现取同一形态：`catalog.go` 里内置一份中性模板（slug/display_name/description 为 `relay-template`，`base_instructions` 为 cc-switch 使用的同一句 117 字符中性提示词，`default_reasoning_level = high`，`supported_reasoning_levels` 为 none/high），逐模型克隆后覆写。差异：`context_window`/`max_context_window` 优先取 `provider_models.context_window`，其次取 `Extra.codex_config.model_context_window`，都没有时用 128000；条目里声明的 `model_reasoning_effort` 会按 `none < minimal < low < medium < high < xhigh < max < ultra` 的官方顺序并入该条目的 supported 档位并设为默认，避免 Codex 认为该档位对当前模型不可用。
+- **逐模型思考档位**（2026-09-22 补充，对齐 cc-switch）：`provider_models.reasoning_levels` 非空时，用声明值**替换**该条目的 `supported_reasoning_levels`（只保留 Codex 认识的档位，函数 `declaredReasoningLevels` 按官方顺序重排、丢弃未知值），`default_reasoning_level` 走三级回落：声明的 `default_reasoning_level`（仍须在支持集内）→ 模板默认档位（`high`，仍须在支持集内）→ 支持集最高档。未声明则整条保留模板默认。cc-switch 的同一算法见 `codex_config.rs`：canonical 档位取交集、默认档按「声明 → 模板 → 最高」回落。
+- **`model_catalog_json` 是条件字段：`provider_models` 为空就完全不写**（`adapter.go` 的 `if len(models) > 0`）。此前条件是 `len(models) > 0 || p.Model != ""`，会让「模型映射留空、靠 Codex 自己发现模型」的渠道（如 `axonhub-any`）被凭空造出一份单条目录；设置 `model_catalog_json` 后 Codex 不再拉 `/v1/models`，效果就是"任意模型渠道被锁成一个模型"。cc-switch 的对应行为是：模型映射为空 → 不生成 catalog 文件、不设 `model_catalog_json`。
+- **渲染前自检**（`validateCatalogEntry`）：宁可报错也不写出 Codex 会拒绝加载的目录；目录存在时，供应商默认模型（`provider.Model`）始终会出现在目录里，即使它不在 `provider_models` 中（profile 指向目录外的模型会被 Codex 视为未知模型）。目录不存在时 profile 里也不写 `model_catalog_json`，`model` 直接交给 Codex 原生解析。
+
+验证方式：`codex debug models --bundled` 二进制字符串挖掘 + 逐项 live 探针（临时 `CODEX_HOME`、127.0.0.1 SSE 假服务、虚构密钥）。端到端复核：用真实库里的 `axonhub-codex` 记录跑 `codex.New().Render()` + `BuildLaunchInputs()`，把产出的 profile/catalog 交给本机 `codex.exe`（仅把 `base_url` 指向本地假服务、`auth.command` 换成占位环境变量），退出 0、`turn.completed`、`model=gpt-6-astra`、`reasoning.effort=low`（与 profile 一致）、instructions 117 字符、工具集为 `[exec_command, write_stdin, request_user_input, view_image, multi_agent_v1, web_search]`（无 `apply_patch`）。
+
 ## 规范修正
 
 遵循 §2/§10 的安全要求，默认通过 `[model_providers.<id>.auth]` 回调 `relay secret get codex <id>`，不把明文凭据写入环境、argv 或配置，也不主动扩大 shell allowlist。`run`/`exec` 在启动前幂等安装主配置注册表和独立 profile，但不修改顶层默认；`switch` 才更新顶层 `model_provider`/`model`。
@@ -24,7 +41,7 @@
 
 - https://developers.openai.com/codex/config-advanced/ （profile 文件迁移、配置覆盖）
 - https://developers.openai.com/codex/config-reference/ （auth.command、env_key、刷新语义与互斥约束）
-- 本机 `codex --help`、`codex exec resume --help` 与上述隔离探针。
+- 本机 `codex --help`、`codex exec resume --help`、`codex debug models --bundled` 与上述隔离探针。
 
 ## 实现边界与验证
 

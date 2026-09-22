@@ -37,11 +37,16 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 		if err != nil {
 			return adapter.Artifact{}, fmt.Errorf("Claude Code settings 无法编码")
 		}
-		if err = json.Unmarshal(data, &settings); err != nil || settings == nil {
+		source := map[string]any{}
+		if err = json.Unmarshal(data, &source); err != nil || source == nil {
 			return adapter.Artifact{}, fmt.Errorf("claude_settings 必须是 JSON 对象")
 		}
+		// spec §6 导入白名单：只消费用户级语义字段。permissions/hooks/
+		// statusLine 等运行环境配置属于 Relay 全局配置，不进入渲染产物。
+		if env, ok := source["env"]; ok {
+			settings["env"] = env
+		}
 	}
-	delete(settings, "apiKeyHelper")
 	if err := validateSettings(settings); err != nil {
 		return adapter.Artifact{}, err
 	}

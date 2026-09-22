@@ -70,7 +70,7 @@ func Open(root string, cipher Cipher) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	_, e = db.Exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
  CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY,display_name TEXT NOT NULL,targets TEXT NOT NULL,base_url TEXT,model TEXT,extra_json TEXT,source TEXT,created_at TEXT,updated_at TEXT,secret_mode TEXT NOT NULL DEFAULT 'callback',status TEXT NOT NULL DEFAULT 'active',content_hash TEXT);
- CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT NOT NULL,display_name TEXT,context_window INTEGER,is_default INTEGER NOT NULL DEFAULT 0,sort_order INTEGER,PRIMARY KEY(provider_id,model_id));
+ CREATE TABLE IF NOT EXISTS provider_models(provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,model_id TEXT NOT NULL,display_name TEXT,context_window INTEGER,reasoning_levels TEXT,default_reasoning_level TEXT,is_default INTEGER NOT NULL DEFAULT 0,sort_order INTEGER,PRIMARY KEY(provider_id,model_id));
  CREATE TABLE IF NOT EXISTS provider_secrets(provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,key_name TEXT NOT NULL,ciphertext BLOB NOT NULL,PRIMARY KEY(provider_id,key_name));
  CREATE TABLE IF NOT EXISTS import_log(id INTEGER PRIMARY KEY AUTOINCREMENT,source TEXT,file_hash TEXT,imported_at TEXT,raw_snapshot BLOB,seen_provider_ids TEXT);`)
 	if e != nil {
@@ -82,6 +82,8 @@ func Open(root string, cipher Cipher) (*Store, error) {
 		`ALTER TABLE providers ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`,
 		`ALTER TABLE providers ADD COLUMN content_hash TEXT`,
 		`ALTER TABLE import_log ADD COLUMN seen_provider_ids TEXT`,
+		`ALTER TABLE provider_models ADD COLUMN reasoning_levels TEXT`,
+		`ALTER TABLE provider_models ADD COLUMN default_reasoning_level TEXT`,
 	} {
 		if _, err := db.Exec(migration); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			db.Close()
@@ -138,8 +140,7 @@ func (s *Store) Import(ctx context.Context, entries []Entry, hash string, snapsh
 			if model.ProviderID != p.ID || strings.TrimSpace(model.ModelID) == "" {
 				return fmt.Errorf("供应商 %s 的模型目录无效", p.ID)
 			}
-			_, e = tx.ExecContext(ctx, `INSERT INTO provider_models(provider_id,model_id,display_name,context_window,is_default,sort_order) VALUES(?,?,?,?,?,?)`, model.ProviderID, model.ModelID, model.DisplayName, model.ContextWindow, model.IsDefault, model.SortOrder)
-			if e != nil {
+			if e = insertModel(ctx, tx, model); e != nil {
 				return fmt.Errorf("保存模型目录失败")
 			}
 		}
@@ -189,7 +190,7 @@ func (s *Store) List(ctx context.Context, target string) ([]Provider, error) {
 }
 
 func (s *Store) Models(ctx context.Context, id string) ([]Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,model_id,display_name,context_window,is_default,sort_order FROM provider_models WHERE provider_id=? ORDER BY sort_order,model_id`, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order FROM provider_models WHERE provider_id=? ORDER BY sort_order,model_id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -197,12 +198,44 @@ func (s *Store) Models(ctx context.Context, id string) ([]Model, error) {
 	models := []Model{}
 	for rows.Next() {
 		var model Model
-		if err = rows.Scan(&model.ProviderID, &model.ModelID, &model.DisplayName, &model.ContextWindow, &model.IsDefault, &model.SortOrder); err != nil {
+		var levels, defaultLevel sql.NullString
+		if err = rows.Scan(&model.ProviderID, &model.ModelID, &model.DisplayName, &model.ContextWindow, &levels, &defaultLevel, &model.IsDefault, &model.SortOrder); err != nil {
 			return nil, err
 		}
+		if model.ReasoningLevels, err = decodeReasoningLevels(levels); err != nil {
+			return nil, err
+		}
+		model.DefaultReasoningLevel = defaultLevel.String
 		models = append(models, model)
 	}
 	return models, rows.Err()
+}
+
+// insertModel 是模型目录唯一的写入路径：列名显式列出，避免新增列后
+// 位置式 INSERT 静默错位（旧库迁移出 content_hash 为 NULL 的那次就是这么踩的）。
+func insertModel(ctx context.Context, tx *sql.Tx, model Model) error {
+	var levels any
+	if len(model.ReasoningLevels) > 0 {
+		data, err := json.Marshal(model.ReasoningLevels)
+		if err != nil {
+			return fmt.Errorf("思考档位无法编码")
+		}
+		levels = string(data)
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO provider_models(provider_id,model_id,display_name,context_window,reasoning_levels,default_reasoning_level,is_default,sort_order) VALUES(?,?,?,?,?,?,?,?)`, model.ProviderID, model.ModelID, model.DisplayName, model.ContextWindow, levels, model.DefaultReasoningLevel, model.IsDefault, model.SortOrder)
+	return err
+}
+
+// 旧库迁移出来的行没有这两列，NULL 视为"未声明"。
+func decodeReasoningLevels(value sql.NullString) ([]string, error) {
+	if !value.Valid || value.String == "" {
+		return nil, nil
+	}
+	var levels []string
+	if err := json.Unmarshal([]byte(value.String), &levels); err != nil {
+		return nil, fmt.Errorf("模型目录的思考档位数据损坏")
+	}
+	return levels, nil
 }
 
 func (s *Store) Upsert(ctx context.Context, entry Entry) error {
@@ -243,7 +276,7 @@ func (s *Store) Upsert(ctx context.Context, entry Entry) error {
 		if strings.TrimSpace(model.ModelID) == "" {
 			return fmt.Errorf("模型 ID 不能为空")
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models VALUES(?,?,?,?,?,?)`, p.ID, model.ModelID, model.DisplayName, model.ContextWindow, model.IsDefault, model.SortOrder); err != nil {
+		if err = insertModel(ctx, tx, model); err != nil {
 			return err
 		}
 	}

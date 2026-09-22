@@ -69,6 +69,33 @@ func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
 	}
 }
 
+func TestRenderConsumesOnlyWhitelistedSettings(t *testing.T) {
+	a := New()
+	p := fixtureProvider()
+	p.Extra["claude_settings"] = map[string]any{
+		"permissions": map[string]any{"allow": []string{"Read"}},
+		"hooks":       map[string]any{"PreToolUse": []any{map[string]any{"type": "command", "command": "echo hi"}}},
+		"statusLine":  map[string]any{"type": "command", "command": "echo status"},
+		"env":         map[string]any{"ANTHROPIC_DEFAULT_HAIKU_MODEL": "fake-small"},
+	}
+	artifact, err := a.Render(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]any
+	if json.Unmarshal(artifact.Content, &settings) != nil {
+		t.Fatal("渲染产物不是合法 JSON")
+	}
+	for _, key := range []string{"permissions", "hooks", "statusLine"} {
+		if _, ok := settings[key]; ok {
+			t.Fatalf("spec §6 白名单：%s 不应进入渲染产物", key)
+		}
+	}
+	if settings["env"].(map[string]any)["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "fake-small" {
+		t.Fatal("env 语义字段未保留")
+	}
+}
+
 func TestRenderRejectsSecretFieldsAndInvalidPaths(t *testing.T) {
 	for _, field := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "OAUTH_TOKEN", "apiKey", "client_secret"} {
 		t.Run(field, func(t *testing.T) {
@@ -247,7 +274,7 @@ func TestApplyGlobalPreservesModifiedObsoleteField(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := readSettings(t, home)
-	settings["permissions"].(map[string]any)["allow"] = []string{"Read", "Write"}
+	settings["env"].(map[string]any)["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "user-changed-model"
 	writeSettings(t, home, settings)
 	p.ID = "second"
 	p.Extra = nil
@@ -259,7 +286,7 @@ func TestApplyGlobalPreservesModifiedObsoleteField(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings = readSettings(t, home)
-	if !reflect.DeepEqual(settings["permissions"].(map[string]any)["allow"], []any{"Read", "Write"}) {
+	if settings["env"].(map[string]any)["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "user-changed-model" {
 		t.Fatal("删除了用户修改的旧字段")
 	}
 }
