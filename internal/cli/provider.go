@@ -82,7 +82,7 @@ func (a *App) providerCommand() *cobra.Command {
 	add.Flags().StringVar(&p.Target, "target", "", "目标 CLI")
 	add.Flags().StringVar(&p.BaseURL, "base-url", "", "API 地址")
 	add.Flags().StringVar(&p.Model, "model", "", "模型")
-	add.Flags().StringVar(&p.SecretMode, "secret-mode", "callback", "密钥模式：callback、env_key 或 env_inline")
+	add.Flags().StringVar(&p.SecretMode, "secret-mode", "callback", "密钥模式：callback 或 env_key")
 	add.Flags().BoolVar(&keyStdin, "api-key-stdin", false, "从标准输入读取 API key")
 	_ = add.RegisterFlagCompletionFunc("target", a.completeTargets())
 	_ = add.MarkFlagRequired("id")
@@ -215,11 +215,16 @@ func (a *App) importCommand() *cobra.Command {
 			}
 			for _, p := range items {
 				existing[providerKey(p.Target, p.ID)] = p
+				if p.DisplayName != "" && p.DisplayName != p.ID {
+					existing[providerKey(p.Target, p.DisplayName)] = p
+				}
 			}
 		}
 		entries := make([]provider.Entry, 0, len(result.Providers))
 		seenByTarget := map[string][]string{}
 		seenSet := map[string]map[string]bool{}
+		// 批内同一 (target,id) 已接受的显示名称，用于 slug 歧义拒绝。
+		batchNames := map[string]string{}
 		report := []map[string]any{}
 		for _, entry := range result.Providers {
 			p := entry.Provider
@@ -232,13 +237,33 @@ func (a *App) importCommand() *cobra.Command {
 			}
 			seenSet[p.Target][p.ID] = true
 			row := map[string]any{"id": p.ID, "original_id": entry.OriginalID, "display_name": p.DisplayName, "target": p.Target, "was_current": entry.Current}
-			if len(entry.Warnings) > 0 {
-				row["warnings"] = entry.Warnings
+			warnings := append([]string{}, entry.Warnings...)
+			// slug 歧义：同一 CLI 下 "A B"/"A-B" 这类不同名称会归一化为同一 ID，
+			// 直接覆盖会在写入前合并掉另一条，因此明确拒绝，不追加数字后缀。
+			key := providerKey(p.Target, p.ID)
+			conflict := ""
+			if prev, ok := batchNames[key]; ok && prev != p.DisplayName {
+				conflict = prev
+			} else if prev, ok := existing[key]; ok && prev.DisplayName != p.DisplayName {
+				conflict = prev.DisplayName
 			}
-			if _, exists := existing[providerKey(p.Target, p.ID)]; exists && onConflict == "skip" {
+			if conflict != "" {
+				warnings = append(warnings, fmt.Sprintf("slug 歧义：显示名称 %q 与 %q 归一化为同一 ID %q，为避免误合并已拒绝写入", p.DisplayName, conflict, p.ID))
+				row["rejected"] = true
+				row["warnings"] = warnings
+				report = append(report, row)
+				continue
+			}
+			// skip 语义与存储层保持一致：同名不同 ID 同样视为冲突，避免旧记录被静默替换。
+			_, idHit := existing[key]
+			_, nameHit := existing[providerKey(p.Target, p.DisplayName)]
+			if (idHit || nameHit) && onConflict == "skip" {
 				row["skipped"] = true
 				report = append(report, row)
 				continue
+			}
+			if len(warnings) > 0 {
+				row["warnings"] = warnings
 			}
 			if _, ok := a.Adapters[p.Target]; !ok {
 				row["unsupported_target"] = p.Target
@@ -248,6 +273,7 @@ func (a *App) importCommand() *cobra.Command {
 			}
 			report = append(report, row)
 			entries = append(entries, provider.Entry{Provider: p, Secrets: entry.Secrets, Models: entry.Models})
+			batchNames[key] = p.DisplayName
 		}
 		stale := []string{}
 		for _, old := range existing {
@@ -359,7 +385,19 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 			inputs.Env = map[string]string{}
 		}
 		if format == "json" {
-			return outputJSON(cmd, inputs.Env)
+			// 集成契约：调用方合并 Env 之前必须先删除 Unset 列出的变量，
+			// 否则继承的认证变量（如 ANTHROPIC_AUTH_TOKEN）会覆盖回调凭据。
+			return outputJSON(cmd, map[string]any{"env": inputs.Env, "unset": inputs.UnsetEnv})
+		}
+		unsetNames := append([]string(nil), inputs.UnsetEnv...)
+		sort.Strings(unsetNames)
+		for _, k := range unsetNames {
+			if strings.ContainsAny(k, "=\r\n\x00") {
+				return fmt.Errorf("dotenv 输出不支持换行或 NUL，请使用 --format json")
+			}
+			if _, e = fmt.Fprintf(cmd.OutOrStdout(), "RELAY_UNSET_ENV=%s\n", k); e != nil {
+				return e
+			}
 		}
 		keys := make([]string, 0, len(inputs.Env))
 		for k, v := range inputs.Env {

@@ -81,3 +81,8 @@ go test ./internal/adapter/codex -run TestLocalCodexIntegration -v
 - `unshellQuoteArg` 只移除完整 argv 项外围的 shell 引号或 flag 等号后的 shell 引号；`model='test'`、`model_providers.relay_*= {...}` 等普通赋值的 TOML 引号原样保留。Relay 必须以 JSON argv 数组提供参数，不能再包一层 shell 命令字符串。
 - 启动流程另会在任务 CODEX_HOME 存在时删除用户对 `shell_environment_policy` 的覆盖，保留 Multica 自己的策略。Relay 默认参数不修改该命名空间；服务鉴权使用 Codex 主进程环境，不依赖模型 shell 获得密钥。
 - 原生入口为 `app-server --listen stdio://`，之后追加上述归一化参数。Relay `NativeArgs` 对该入口保持透明。
+
+
+## 2026-09-24：回调绑定数据目录
+
+`auth.args` 从 `["secret","get","codex",<id>]` 改为 `["--home",<abs-relay-root>,"secret","get","codex",<id>]`。理由与 Claude Code 侧一致：外部启动方式（Multica、relay-codex 包装）可能不带 `--home`，不传则会解析到默认 `~/.relay`，同名供应商下可能读错密钥。Codex 的 auth 是 argv 数组形式，不经 shell 解析，无需转义。

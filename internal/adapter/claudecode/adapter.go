@@ -70,7 +70,13 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 	if len(env) > 0 {
 		settings["env"] = env
 	}
-	settings["apiKeyHelper"] = "relay secret get claude " + p.ID
+	relayHome, err := filepath.Abs(relayRoot)
+	if err != nil {
+		return adapter.Artifact{}, fmt.Errorf("无法解析 Relay 数据目录: %w", err)
+	}
+	// 回调绑定渲染时的数据目录：Multica/relay-codex 等外部启动方式可能不带 --home，
+	// 不传则会解析到默认 ~/.relay，同名供应商下可能读错密钥。
+	settings["apiKeyHelper"] = "relay --home " + shellQuote(relayHome) + " secret get claude " + p.ID
 	if len(models) > 0 {
 		options := make([]map[string]any, 0, len(models))
 		for _, model := range models {
@@ -102,6 +108,11 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 }
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// shellQuote 按 POSIX 单引号规则转义，供 apiKeyHelper 这类由 shell 解析的回调命令使用。
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'" + `\` + "''") + "'"
+}
 
 // 清除继承的身份、模型与第三方路由，避免上一供应商污染本次启动。
 var providerEnv = []string{
@@ -229,7 +240,7 @@ func rejectCredentialFields(value any) error {
 	case map[string]any:
 		for key, child := range value {
 			if key == "apiKeyHelper" {
-				if helper, ok := child.(string); !ok || !strings.HasPrefix(helper, "relay secret get claude ") {
+				if helper, ok := child.(string); !ok || !strings.HasPrefix(helper, "relay --home ") || !strings.Contains(helper, " secret get claude ") {
 					return fmt.Errorf("Claude Code apiKeyHelper 必须由 Relay 管理")
 				}
 				continue

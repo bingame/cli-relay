@@ -161,7 +161,7 @@ CREATE TABLE import_log (
 
 密钥加密：MVP 用操作系统 keychain（macOS Keychain / Linux libsecret，通过成熟库调用）；无 keychain 环境下退化为本地对称加密（密钥派生自机器 ID + 用户口令，首次运行时提示设置）。**绝不使用可逆的简单混淆代替加密。**
 
-`secret_mode` 说明：两个 target CLI 都支持"回调式取密钥"（Codex 是 `auth.command`，Claude Code 是 `apiKeyHelper`），默认都用 `callback` 模式，二者共用同一个 `relay secret get <cli> <provider_id>` 实现；`env_key`/`env_inline` 作为可选降级路径保留。这两个 Adapter 在密钥机制上现在是对称的，不存在能力差异。
+`secret_mode` 说明：两个 target CLI 都支持"回调式取密钥"（Codex 是 `auth.command`，Claude Code 是 `apiKeyHelper`），默认都用 `callback` 模式，二者共用同一个 `relay secret get <cli> <provider_id>` 实现；`env_key` 作为可选降级路径保留。`env_inline`（明文写入渲染产物）已禁用：与 AGENTS.md「密钥只在加密存储、进程内存和明确请求的 render-env 输出中出现」冲突，不允许落地。这两个 Adapter 在密钥机制上现在是对称的，不存在能力差异。
 
 ### 3.2 `~/.relay/rendered/<target_cli>/<provider_id>.*`
 每个 Adapter 决定自己的产物格式：
@@ -218,7 +218,9 @@ interface LaunchAdapter {
   // 全局切换：把 Rendered Artifact 合并进该 CLI 的全局原生配置文件
   applyGlobal(artifact: RenderedArtifact): void;
 
-  // 临时启动：返回本次 spawn 需要的 argv 片段 + env 片段，不落盘、不改全局文件
+  // 临时启动：返回本次 spawn 需要的 argv 片段 + env 片段，不修改 Claude Code 的全局文件；
+  // Codex 例外：为保证回调自包含，BuildLaunchInputs 会把 `[model_providers.<id>]` 注册进
+  // `~/.codex/config.toml` 并安装独立 profile 文件（见 §5.2）。
   // （若该 Adapter 的密钥机制是回调式如 Codex 的 auth.command，env 片段可能为空，
   //   因为密钥解析发生在目标 CLI 内部对 Relay 的再次调用，而不是这里）
   buildLaunchInputs(artifact: RenderedArtifact, secrets: ResolvedSecrets): {
@@ -250,9 +252,9 @@ Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不
 - **`modelPicker` 只在供应商**声明过**模型目录（`provider_models` 非空）时才写**：`replaceBuiltInOptions: true` 语义是「替换内置模型菜单」，给一个从未声明模型列表的中转渠道（如 cc-switch 里「模型映射」留空的渠道）凭空造一份单条 `modelPicker`，等于把"任意模型都能用"的渠道锁成一个模型——这正是本版修正的用户可见缺陷（见 §5.2 同类 gating）。未声明时 Relay 不写该字段，模型选择交回 Claude Code 原生机制（内置菜单 + `extra.claude_settings.env` 里透传的 `ANTHROPIC_DEFAULT_*_MODEL` 等变量，cc-switch 用的也是这套）。
 - `relay secret get claude <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
 - 刷新间隔默认 5 分钟（`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` 可调），与 Codex 的 `refresh_interval_ms` 默认值（300000ms）刚好对称，两个 Adapter 的密钥回调设计可以共享同一套心智模型。
-- `env_key`/明文写入 `env` 块的方式依然作为可选降级路径保留（`secret_mode = "env_inline"`），供不方便跑回调命令的场景使用；此时 `renders()` 产出的 settings 文件里才会真正含有明文，需要 `0600` 权限保护。
+- `env_inline`（明文写入渲染产物）已禁用，与 AGENTS.md 冲突；`env_key`（进程环境注入）仍作为可选降级路径保留，密钥不落任何配置文件。
 - `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`（保留其余用户已有 key，只覆盖 Relay 管理的字段，用注释/标记块界定 Relay 管理范围，避免覆盖用户手工添加的其他配置）。
-- `buildLaunchInputs()`：`argv = ["--settings", <rendered_file_path>]`，`env = {}`（默认路径下密钥走 `apiKeyHelper` 回调，不需要 Relay 额外注入进程环境；`env_inline` 降级路径下同样不需要额外注入，因为密钥已经在渲染文件里）。
+- `buildLaunchInputs()`：`argv = ["--settings", <rendered_file_path>]`，`env = {}`（默认路径下密钥走 `apiKeyHelper` 回调，不需要 Relay 额外注入进程环境）。
 - `resumeArgs(id)`：`["--resume", id]`。
 
 ### 5.2 CodexAdapter（两段式：argv 选 profile，密钥走独立通道）
@@ -335,7 +337,7 @@ Relay 只承载**用户能编辑的那几列**，其余一律交给目标 CLI �
 Codex 侧的 `base_instructions`（系统提示词）、`input_modalities`、`supports_parallel_tool_calls` 等条目字段属于 cc-switch 内部模板/预设，不是逐条可编辑项，Relay 同样只从内置中性模板继承、不新增配置面。这条边界是本版新增内容的取舍依据：**宁可少一个字段，也不要造出上游没有的语义**。
 
 ### 5.3 密钥永不进入 argv
-两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见）。允许的载体只有：(a) 文件内容（`env_inline`/`env_key` 降级路径下的渲染文件，权限 `0600`）；(b) 直接注入子进程环境变量表（`env_key` 降级路径）；(c) 通过 `relay secret get` 的 stdout 管道直传给调用它的进程（**两个 Adapter 的默认路径**——Claude Code 走 `apiKeyHelper`，Codex 走 `auth.command`，这是三者里暴露面最小的一种，因为不经过任何持久化环境变量表，也不落任何配置文件）。
+两个 Adapter 都必须保证：明文密钥不会出现在任何进程的 argv 里（`ps`/`/proc/<pid>/cmdline` 可见）。允许的载体只有：(a) 直接注入子进程环境变量表（`env_key` 降级路径，以及 callback 模式下 Relay 明确透传的 `RELAY_PASSPHRASE` 解锁口令）；(b) 通过 `relay secret get` 的 stdout 管道直传给调用它的进程（**两个 Adapter 的默认路径**——Claude Code 走 `apiKeyHelper`，Codex 走 `auth.command`，这是暴露面最小的一种，因为不经过任何持久化环境变量表，也不落任何配置文件）。
 
 ### 5.4 渲染缓存策略
 
@@ -345,7 +347,7 @@ Codex 侧的 `base_instructions`（系统提示词）、`input_modalities`、`su
 - 任何读取渲染产物之前（`switch`/`run`/`exec`/`render-args`/`render-env`），先比对当前记录算出的 hash 与渲染产物里记录的 hash（渲染产物自身也存一份来源 hash，比如 Claude Code settings JSON 里放一个 Relay 专用的隐藏字段，Codex 的 toml 片段放一行注释）；不一致就视为陈旧，先重新 `render()` 再使用。这样用户不需要记得手动 refresh，缓存永远等价于"和 DB 一致的最新渲染结果"。
 - 若用户手动改过渲染产物本身（文件内容 hash 与 Relay 上次写入时记录的不一致，但 DB 记录没变），视为「用户手动定制」，重新渲染前需要确认（`是否覆盖你的手动修改? [y/N]`），不静默覆盖。
 - **默认配置下（两个 Adapter 都走回调式密钥机制：Claude Code 的 `apiKeyHelper`、Codex 的 `auth.command`），渲染产物里不含任何明文密钥，可以放心一直持久化缓存，不需要考虑密钥留存时长的问题**——这也是为什么本 spec 默认两个 Adapter 都用回调机制而不是明文注入：不仅安全性更好，还顺带让缓存策略对两个 Adapter 保持统一，不需要区别对待。
-- `--ephemeral` 可选模式：只在用户主动选择 `env_inline`/`env_key` 这类明文降级路径时才有意义（默认路径下没有明文可言，开这个选项没有收益）。不写入 `rendered/` 目录，而是写到 `~/.relay/tmp/` 下的一次性文件，`exec` 模式下子进程退出后立即删除；**`run` 模式因为是 execve 替换、Relay 进程在那一刻就已经不存在，无法保证启动后立即清理，只能做成「写入 tmp 目录 + 下次调用前清理上一批」这种尽力而为的垃圾回收，不能承诺"用完立刻消失"**——这个限制需要如实告知用户，不要在文档或提示语里做出做不到的保证。
+- `--ephemeral` 可选模式：只在用户主动选择 `env_key` 这类明文降级路径时才有意义（默认路径下没有明文可言，开这个选项没有收益）。不写入 `rendered/` 目录，而是写到 `~/.relay/tmp/` 下的一次性文件，`exec` 模式下子进程退出后立即删除；**`run` 模式因为是 execve 替换、Relay 进程在那一刻就已经不存在，无法保证启动后立即清理，只能做成「写入 tmp 目录 + 下次调用前清理上一批」这种尽力而为的垃圾回收，不能承诺"用完立刻消失"**——这个限制需要如实告知用户，不要在文档或提示语里做出做不到的保证。
 
 ### 5.5 Skill 安装
 
@@ -376,7 +378,8 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
    - **模型目录只承载源里真实声明的「模型映射」**（Codex 侧是 `settings_config.modelCatalog` 的非空 `models` 数组；Claude Code 侧是其原生模型声明字段）。源里没有声明就必须**一条 `provider_models` 记录都不写入**——`provider.Model`（默认模型）不是模型目录，不得用它伪造记录，否则下游 Adapter 会因"目录非空"而渲染出 `model_catalog_json`/`modelPicker`，把"任意模型"渠道锁死（见 §5.2 gating）。逐条导入的字段限于显示名、模型 ID、上下文窗口、思考档位与默认档位；模型 ID 与显示名需按 cc-switch 的行为做 trim 后去重、跳过空值，默认档位取自源里的默认模型标记。
    - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配与覆盖只按 `(target, id)` 进行**——本地已存在相同 `(target, id)`（无论 `source` 是 `manual` 还是 `cc-switch-import`）时，导入记录直接整体覆盖它；同一 CLI 内若既有记录与本条显示名称相同但 ID 不同，同样视为被覆盖（因为 `UNIQUE(target, display_name)` 不允许两者共存，cc-switch 也只在同一 CLI 内约束名称唯一）。这是刻意与 cc-switch 保持一致的"直接覆盖"语义：不生成数字后缀改名，不区分 `manual` 记录。命中后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
-     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。
+     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。**跳过的匹配键与存储层一致**：`(target, id)` 或 `(target, display_name)` 任一命中即视为冲突，避免同名不同 ID 的旧记录被静默替换。
+   - **slug 歧义拒绝**：`Slugify(display_name)` 不保证全局唯一——同一 CLI 下 "A B"/"A-B" 会归一化为同一 ID。批内或库内已存在同一 `(target, id)` 但显示名称不同时，直接拒绝写入（报告字段 `rejected: true` + `warnings`），不追加数字后缀，避免误合并。
    - **ID 名称**：Relay 的 provider `id` 由 `slugify(display_name)` 归一化而来（不再拼接 target，也不再追加 `-2/-3...` 数字后缀）；cc-switch 的原始 `id` 仅作为 `original_id` 保留在报告里供追溯，不作为 Relay 的匹配键。因此**没有 `conflict_renamed` 信号**。不同 CLI 之间允许出现同 ID、同显示名称，由 `(target, id)` 主键与 `UNIQUE(target, display_name)` 各自约束。
 5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据；若这两张表里含凭据类内容需先加密再存（见 §10 安全要求第 4 条）。
 6. **失效清理**：把本次导出快照里出现的所有 `(target, id)` 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且其 `(target, id)` 不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
@@ -536,7 +539,7 @@ multica agent create --name my-agent --runtime-id codex \
 ## 10. 安全要求汇总（贯穿全 spec，此处集中列出供实现自检）
 1. 明文密钥只允许出现在：`provider_secrets` 表的加密列、即将 spawn 的子进程环境变量表。**不允许**出现在：任何 argv、任何日志输出、Handoff Doc、`render-args` 的输出。
 2. `render-env` 的输出本身包含明文（因为下游就是要拿它当 env 用），文档要显式警告调用方"这是敏感输出，不要打印到共享终端/CI 日志"。
-3. 默认配置下（回调式密钥），Codex 的 `config.toml` 片段只写 `auth.command`/`args`，Claude Code 的 settings 文件只写 `apiKeyHelper`，两者都不含任何明文；只有用户主动切到 `env_key`/`env_inline` 降级路径时才会产生含明文的文件，此时该文件权限必须设为 `0600`，且不纳入任何自动同步/备份的路径。
+3. 默认配置下（回调式密钥），Codex 的 `config.toml` 片段只写 `auth.command`/`args`，Claude Code 的 settings 文件只写 `apiKeyHelper`，两者都不含任何明文；`env_key` 降级路径通过进程环境注入、不落配置文件，因此也不产生含明文的文件。`env_inline`（明文写入渲染产物）已禁用。
 4. `import_log.raw_snapshot` 里如果 cc-switch 的 `mcp_servers` 表包含凭据（部分 MCP server 配置会带 token），也要在存储前做加密，不能因为「本版本不解析它」就当作普通数据明文存放。
 5. 所有对外部文件系统路径的操作（尤其是 Handoff Doc 读取、cc-switch 导入文件读取）要做路径校验，防止路径穿越。
 

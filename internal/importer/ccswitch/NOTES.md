@@ -41,3 +41,9 @@
 - 根因（本仓库侧）：导入器在 `entry.Models` 为空时用 `Provider.Model` **伪造**一条 `provider_models`，Adapter 又据此写出 `model_catalog_json`。现已删除该伪造分支，改为 `entry.Models = append(entry.Models, codexCatalogModels(settings["modelCatalog"], entry.Provider.Model)...)`——**源里没声明就不产生任何模型记录**。
 - `codexCatalogModels` 逐条读取 cc-switch 「模型映射」表里用户可编辑的四列：`model`（trim 后作 model_id，空则跳过、重复则去重）、`displayName`、`contextWindow`、`reasoningLevels` + `defaultReasoningLevel`；`is_default` 来自 `modelID == 源里的默认模型`，`sortOrder` 按出现顺序。`catalogReasoningLevels` 只做 trim/去重（未知档位留给 Adapter 按 Codex canonical 列表过滤，与 cc-switch「声明 ∩ canonical」等价），`catalogInt` 兼容 JSON 里的 float64/int64/json.Number/字符串，非正整数一律忽略。
 - 回归测试：`TestCodexModelCatalogImport`（有 `modelCatalog` 时逐列还原，含 trim 与去重）、`TestImportDoesNotInventModelCatalog`（无 `modelCatalog` 时 `entry.Models` 必须为空且不因 `Provider.Model` 非空而出现记录）。
+
+
+## 2026-09-24：slug 歧义拒绝与 skip 语义对齐
+
+- **slug 歧义拒绝**：`Slugify(display_name)` 不保证全局唯一——同一 CLI 下 "A B"/"A-B" 会归一化为同一 ID `a-b`。批内或库内已存在同一 `(target, id)` 但显示名称不同时，导入器明确拒绝写入（报告字段 `rejected: true` + `warnings`），不追加数字后缀，避免误合并。
+- **skip 匹配键对齐**：`--on-conflict skip` 的匹配键与存储层 `Upsert` 的"按 id 或 display_name 删除"保持一致：`(target, id)` 或 `(target, display_name)` 任一命中即视为冲突，避免同名不同 ID 的旧记录被静默替换。

@@ -1,4 +1,88 @@
 # Supports irm <url> | iex and installs the prebuilt Windows amd64 binary.
+function Install-RelayCompletion {
+    param([Parameter(Mandatory = $true)][string]$RelayExe)
+    if ($env:RELAY_NO_COMPLETION -eq '1') { return $false }
+    if (-not (Test-Path -LiteralPath $RelayExe)) { throw "Relay executable not found: $RelayExe" }
+    # Generate and validate the script before touching any profile so a broken
+    # completion command cannot leave a half-configured shell behind.
+    $generated = & $RelayExe completion powershell | Out-String
+    if ($LASTEXITCODE -ne 0 -or -not $generated) { throw 'Unable to generate the PowerShell completion script' }
+    $script:RelayCompletionScript = $generated
+    $documents = $env:RELAY_SHELL_CONFIG_DIR
+    if ($documents) {
+        if (-not [IO.Path]::IsPathRooted($documents)) { throw 'RELAY_SHELL_CONFIG_DIR must be an absolute path' }
+        $documents = [IO.Path]::GetFullPath($documents)
+    } else {
+        $documents = [Environment]::GetFolderPath('MyDocuments')
+        if (-not $documents) {
+            if (-not $env:USERPROFILE) { throw 'Cannot locate the PowerShell profile directory' }
+            $documents = Join-Path $env:USERPROFILE 'Documents'
+        }
+    }
+    $start = '# RELAY:START - Relay completion (managed block, do not edit manually)'
+    $end = '# RELAY:END'
+    $quoted = "'" + $RelayExe.Replace("'", "''") + "'"
+    $command = "& $quoted completion powershell | Out-String | Invoke-Expression"
+    $pattern = '(?s)' + [regex]::Escape($start) + '.*?' + [regex]::Escape($end) + '[ \t]*\r?\n?'
+    $profilePaths = @(
+        (Join-Path $documents 'PowerShell\Microsoft.PowerShell_profile.ps1'),
+        (Join-Path $documents 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1')
+    )
+    # Refuse to touch either profile if any of them is a reparse point, so the
+    # two hosts never diverge (one updated, one still a link).
+    foreach ($profilePath in $profilePaths) {
+        if (Test-Path -LiteralPath $profilePath) {
+            $item = Get-Item -LiteralPath $profilePath -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "The PowerShell profile is a link and was not modified: $profilePath"
+            }
+        }
+    }
+    foreach ($profilePath in $profilePaths) {
+        $parent = Split-Path -Parent $profilePath
+        if (-not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+        $encoding = New-Object System.Text.UTF8Encoding $true
+        $text = ''
+        if (Test-Path -LiteralPath $profilePath) {
+            $bytes = [IO.File]::ReadAllBytes($profilePath)
+            $offset = 0
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) {
+                $encoding = New-Object System.Text.UTF8Encoding $true
+                $offset = 3
+            } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) {
+                $encoding = New-Object System.Text.UnicodeEncoding $false, $true
+                $offset = 2
+            } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 254 -and $bytes[1] -eq 255) {
+                $encoding = New-Object System.Text.UnicodeEncoding $true, $true
+                $offset = 2
+            } else {
+                $strictUtf8 = New-Object System.Text.UTF8Encoding $false, $true
+                try {
+                    [void]$strictUtf8.GetString($bytes)
+                    $encoding = New-Object System.Text.UTF8Encoding $false
+                } catch {
+                    $encoding = [Text.Encoding]::Default
+                }
+            }
+            if ($bytes.Length -gt $offset) { $text = $encoding.GetString($bytes, $offset, $bytes.Length - $offset) }
+        }
+        $newline = "`r`n"
+        if ($text -and $text.Contains([string][char]10) -and -not $text.Contains([string]([char]13) + [char]10)) { $newline = [string][char]10 }
+        $block = $start + $newline + $command + $newline + $end
+        $stripped = [regex]::Replace($text, $pattern, '')
+        $stripped = $stripped.TrimEnd([char]13, [char]10)
+        if ($stripped.Length -gt 0) {
+            $updated = $stripped + $newline + $newline + $block + $newline
+        } else {
+            $updated = $block + $newline
+        }
+        if ($updated -ne $text) { [IO.File]::WriteAllText($profilePath, $updated, $encoding) }
+    }
+    return $true
+}
+
 function Install-Relay {
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version Latest
@@ -88,7 +172,17 @@ function Install-Relay {
             & $target skill install
             if ($LASTEXITCODE -ne 0) { throw 'The binary is installed, but Skill installation failed; resolve the error and run relay skill install' }
         }
-        Write-Host "Relay installed at $target. Run relay --help to get started."
+        $completionConfigured = $false
+        try {
+            $completionConfigured = Install-RelayCompletion -RelayExe $target
+        } catch {
+            throw "The binary is installed, but shell completion setup failed: $($_.Exception.Message)"
+        }
+        if ($completionConfigured) {
+            Write-Host "Relay installed at $target. New PowerShell windows load command completion. Run relay --help to get started."
+        } else {
+            Write-Host "Relay installed at $target. Run relay --help to get started."
+        }
     } finally {
         if ($stage -and (Test-Path -LiteralPath $stage)) { Remove-Item -LiteralPath $stage -Force }
         # Recursively remove only the unique temporary directory created above.
@@ -100,3 +194,4 @@ function Install-Relay {
     }
 }
 Install-Relay
+if ($script:RelayCompletionScript) { Invoke-Expression $script:RelayCompletionScript | Out-Null }

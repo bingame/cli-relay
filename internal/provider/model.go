@@ -113,8 +113,8 @@ func (p Provider) Validate() error {
 	if !ValidID(p.Target) {
 		return fmt.Errorf("无效的目标 CLI")
 	}
-	if mode := p.EffectiveSecretMode(); mode != "callback" && mode != "env_key" && mode != "env_inline" {
-		return fmt.Errorf("无效的密钥模式")
+	if mode := p.EffectiveSecretMode(); mode != "callback" && mode != "env_key" {
+		return fmt.Errorf("无效的密钥模式（env_inline 明文落盘已禁用，请使用 callback 或 env_key）")
 	}
 	if status := p.EffectiveStatus(); status != "active" && status != "disabled" {
 		return fmt.Errorf("无效的供应商状态")

@@ -165,8 +165,14 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 	}
 	switch p.EffectiveSecretMode() {
 	case "callback":
+		// 回调绑定渲染时的数据目录：Multica/relay-codex 等外部启动方式可能不带 --home，
+		// 不传则会解析到默认 ~/.relay，同名供应商下可能读错密钥。args 为数组，不经 shell 解析。
+		relayHome, err := filepath.Abs(relayRoot)
+		if err != nil {
+			return adapter.Artifact{}, fmt.Errorf("无法解析 Relay 数据目录: %w", err)
+		}
 		definition["auth"] = map[string]any{
-			"command": "relay", "args": []string{"secret", "get", "codex", p.ID},
+			"command": "relay", "args": []string{"--home", relayHome, "secret", "get", "codex", p.ID},
 			"timeout_ms": int64(5000), "refresh_interval_ms": int64(0),
 		}
 	case "env_key":

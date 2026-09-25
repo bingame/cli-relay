@@ -86,7 +86,7 @@ func WriteFile(path string, data []byte, mode os.FileMode) error {
 	if e = f.Close(); e != nil {
 		return e
 	}
-	return os.Rename(tmp, path)
+	return replaceFile(tmp, path)
 }
 func ReadRegular(path string, maxBytes int64) ([]byte, error) {
 	if err := CheckPath(path); err != nil {

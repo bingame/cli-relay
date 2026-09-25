@@ -23,11 +23,13 @@
 - Windows 默认 `%LOCALAPPDATA%\Relay\bin`，SHA-256 校验后同卷替换，更新当前进程及用户 PATH。不调用 `setx`，避免 PATH 截断、展开或混入系统 PATH。只发布 amd64，不把其他架构误报成 amd64。
 - 私有仓库命令必须使用 `gh release download --output - | Out-String | iex`。`gh` 的标准输出进入 PowerShell 后是多个逐行字符串对象；缺少 `Out-String` 时，`iex` 会逐项执行，在多行函数闭合前报语法错误。`install.ps1` 同时只包含 ASCII 字符，避免原生程序输出按其他系统代码页解码 UTF-8 中文时破坏脚本。测试会拒绝重新引入非 ASCII 字节，并以逐行读取、聚合后执行的方式验证安装器。
 - 两端默认执行新安装二进制的 `skill install`。失败会返回非零并指明二进制已经安装，不能把 Skill 失败当成完整成功。`RELAY_SKIP_SKILLS=1` 可跳过；`RELAY_NO_MODIFY_PATH=1` 不持久化 PATH。
+- 两端默认还会把 `relay` 命令补全写入当前用户 shell 配置：PowerShell 写 profile，bash/zsh 写对应 rc，fish 写独立 `relay.fish`，重开终端自动生效。单独运行 `relay completion powershell` 只打印补全脚本，不会注册。
+- `RELAY_NO_COMPLETION=1` 跳过补全，PATH 与 Skill 安装照常。PowerShell profile 保留原编码与换行，任一 profile 是符号链接则整体失败；bash/zsh 使用绝对路径 `eval`，zsh 只在缺少 compdef 时运行 `compinit -C`；fish 已存在且无托管标记的 `relay.fish` 会被保留并提示，符号链接拒绝修改。
 - 手动归档和 `go install` 没有安装后钩子，需要执行一次 `relay skill install`。Homebrew/Scoop 带安装后钩子。
 - SHA-256 能检测下载损坏和不匹配，信任来源为 HTTPS 发行仓库；当前没有独立签名、macOS 公证、apt/deb 或 winget 发布流程。
 
 ## 验证
 
-`scripts/test_installers.py` 使用真实二进制、临时目录和离线下载替身；验证首次安装、自动 Skill、重复升级、PowerShell 安装器纯 ASCII 及逐行管道聚合、校验不匹配/重复条目/下载失败时保留旧文件，以及用户修改保护。Windows 测试禁用用户 PATH 持久化；POSIX PATH 只写临时 HOME，覆盖含空格及单引号的路径。不会修改真实 Claude/Codex/Multica 配置。
+`scripts/test_installers.py` 使用真实二进制、临时目录和离线下载替身；验证首次安装、自动 Skill、重复升级、PowerShell 安装器纯 ASCII 及逐行管道聚合、校验不匹配/重复条目/下载失败时保留旧文件、用户修改保护，以及命令补全写入、重复安装幂等、跳过安装、符号链接保护和 `pwsh` 下 `CompleteInput` 的注册探测。Windows 测试禁用用户 PATH 持久化；POSIX PATH 只写临时 HOME，覆盖含空格及单引号的路径。不会修改真实 Claude/Codex/Multica 配置。
 
 `scripts/check_release.py dist` 根据 GoReleaser 的 artifact 元数据校验五平台归档、Windows 裸二进制及 Homebrew/Scoop 校验和。CI 额外在 Linux、macOS、Windows 运行原生构建及安装器；Linux 运行 race detector 和 ShellCheck。

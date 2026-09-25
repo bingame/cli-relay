@@ -19,6 +19,14 @@ def check(value, message):
         raise AssertionError(message)
 
 
+def marker_count(data, marker=b'# RELAY:START - Relay completion'):
+    # 补全块会按 profile 原有编码写回；UTF-16 文件需先解码再统计，否则字节不匹配。
+    if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        encoding = 'utf-16-le' if data[:2] == b'\xff\xfe' else 'utf-16-be'
+        return data[2:].decode(encoding, errors='replace').count(marker.decode())
+    return data.count(marker)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True)
@@ -43,6 +51,7 @@ def main():
                    RELAY_CODEX_BIN=str(binary), RELAY_CLAUDE_BIN=str(binary), SHELL='/bin/bash', RELAY_DOWNLOAD_MODE='direct')
         if windows:
             env['RELAY_NO_MODIFY_PATH'] = '1'
+            env['RELAY_SHELL_CONFIG_DIR'] = str(root)
             asset = 'relay-windows-amd64.exe'
             shutil.copyfile(binary, fixtures / asset)
             target = root / 'Relay' / 'bin' / 'relay.exe'
@@ -67,7 +76,9 @@ try {
 } catch { Write-Error $_; exit 1 }
 ''', encoding='utf-8')
             env['RELAY_TEST_INSTALLER'] = str(REPO / 'install.ps1')
-            shell = args.powershell or shutil.which('powershell') or shutil.which('pwsh')
+            # 补全注册探测依赖 pwsh 的 CommandCompletion 原生参数补全；Windows PowerShell 5.1
+            # 对原生命令的 CompleteInput 不触发注册的 ArgumentCompleter，因此优先使用 pwsh。
+            shell = args.powershell or shutil.which('pwsh') or shutil.which('powershell')
             check(shell, '缺少 PowerShell')
             command = [shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(wrapper)]
         else:
@@ -109,27 +120,170 @@ else: shutil.copyfile(Path(os.environ['RELAY_TEST_FIXTURES']) / args[args.index(
         checksums = fixtures / 'checksums.txt'
         checksums.write_text(digest + '  ' + asset + '\n', encoding='ascii')
 
-        def install(success=True):
-            result = subprocess.run(command, cwd=root, env=env, capture_output=True, timeout=90)
+        def install(success=True, overrides=None):
+            run_env = dict(env)
+            if overrides:
+                run_env.update(overrides)
+            result = subprocess.run(command, cwd=root, env=run_env, capture_output=True, timeout=120)
             check((result.returncode == 0) == success,
                   f'安装器退出码异常 {result.returncode}: ' + result.stdout.decode('utf-8', 'replace') + result.stderr.decode('utf-8', 'replace'))
+            return result
 
+        # 首次安装：验证二进制、自动 Skill，以及补全配置文件被创建/写入。
         install()
         check(target.read_bytes() == binary.read_bytes(), '安装后的二进制不一致')
         for cli in ['codex', 'claude']:
             installed = root / cli / 'skills' / 'relay-handoff' / 'SKILL.md'
             check(installed.read_bytes() == (REPO / 'skills/relay-handoff/SKILL.md').read_bytes(), '没有自动安装内嵌 Skill')
-        install()  # 原子升级和幂等重复安装
-        env['RELAY_DOWNLOAD_MODE'] = 'gh'
-        install()  # 私有仓库通过已登录的 gh 下载，不向 argv 传入凭据
-        env['RELAY_DOWNLOAD_MODE'] = 'direct'
-        if not windows:
-            profile = root / '.bashrc'
-            check(profile.read_text().count('# Relay') == 1, 'PATH 配置重复写入')
-            probe = subprocess.run(['sh', '-c', '. "$HOME/.bashrc"; command -v relay'], env=env, capture_output=True, text=True)
-            check(probe.returncode == 0 and probe.stdout.strip() == str(target),
-                  '含空格/单引号的 PATH 设置无效: ' + repr(profile.read_text()) + repr(probe.stderr) + repr(probe.stdout))
 
+        if windows:
+            profiles = {
+                'pwsh': root / 'PowerShell' / 'Microsoft.PowerShell_profile.ps1',
+                'ps': root / 'WindowsPowerShell' / 'Microsoft.PowerShell_profile.ps1',
+            }
+            for name, profile in profiles.items():
+                check(profile.exists(), f'安装器未创建 {name} profile')
+                check(marker_count(profile.read_bytes()) == 1, f'{name} profile 补全块数量异常')
+                check(str(target).replace("'", "''").encode() in profile.read_bytes(), f'{name} profile 未写入绝对补全路径')
+
+            # 预置带不同编码的 profile，验证安装器保留原内容、编码和换行。
+            profiles['pwsh'].write_bytes(b'\xef\xbb\xbf' + b"Write-Host 'pwsh-profile'\n")
+            profiles['ps'].write_bytes(b'\xff\xfe' + "Write-Host 'ps-profile'\n".encode('utf-16-le'))
+            install()  # 第二次安装，验证内容/编码保留
+            pwsh_bytes = profiles['pwsh'].read_bytes()
+            ps_bytes = profiles['ps'].read_bytes()
+            check(pwsh_bytes.startswith(b'\xef\xbb\xbf'), 'UTF-8 BOM 未保留')
+            check(ps_bytes.startswith(b'\xff\xfe'), 'UTF-16 LE BOM 未保留')
+            check(b'Write-Host \'pwsh-profile\'' in pwsh_bytes, 'pwsh profile 原有内容丢失')
+            check("Write-Host 'ps-profile'".encode('utf-16-le') in ps_bytes, 'ps profile 原有内容丢失')
+            check(marker_count(pwsh_bytes) == 1 and marker_count(ps_bytes) == 1, '编码保留安装后补全块数量异常')
+            # 重复安装保持幂等（仍只有一个补全块）。
+            install()
+            check(marker_count(profiles['pwsh'].read_bytes()) == 1, '重复安装使 pwsh 补全块重复')
+            check(marker_count(profiles['ps'].read_bytes()) == 1, '重复安装使 ps 补全块重复')
+
+            # 私有仓库路径也保持幂等。
+            install(overrides={'RELAY_DOWNLOAD_MODE': 'gh'})
+            check(marker_count(profiles['pwsh'].read_bytes()) == 1, 'gh 安装使 pwsh 补全块重复')
+            check(marker_count(profiles['ps'].read_bytes()) == 1, 'gh 安装使 ps 补全块重复')
+
+            # 补全注册探测：用一个新进程加载 profile，确认 Tab 补全真的被注册。
+            probe = root / 'probe.ps1'
+            relay_dir_ps = str(root / 'Relay' / 'bin').replace("'", "''")
+            config_ps = str(root).replace("'", "''")
+            probe.write_text(r'''$ErrorActionPreference = 'Stop'
+$relayDir = '@@RELAY_DIR@@'
+$env:PATH = $relayDir + [IO.Path]::PathSeparator + $env:PATH
+$config = '@@CONFIG@@'
+$profiles = @(
+  (Join-Path $config 'PowerShell\\Microsoft.PowerShell_profile.ps1'),
+  (Join-Path $config 'WindowsPowerShell\\Microsoft.PowerShell_profile.ps1')
+)
+foreach ($p in $profiles) { if (Test-Path -LiteralPath $p) { . $p } }
+$result = [System.Management.Automation.CommandCompletion]::CompleteInput('relay ', 6, $null)
+$names = @($result.CompletionMatches | ForEach-Object { $_.CompletionText })
+if ($names -notcontains 'completion') { throw ('completion not registered: ' + ($names -join ',')) }
+'OK'
+'''.replace('@@RELAY_DIR@@', relay_dir_ps).replace('@@CONFIG@@', config_ps), encoding='utf-8')
+            probe_env = dict(env)
+            probe_env['PATH'] = str(root / 'Relay' / 'bin') + os.pathsep + probe_env['PATH']
+            probe_result = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(probe)],
+                                          cwd=root, env=probe_env, capture_output=True, timeout=90)
+            check(probe_result.returncode == 0 and b'OK' in probe_result.stdout,
+                  '补全未真正注册: ' + probe_result.stdout.decode('utf-8', 'replace') + probe_result.stderr.decode('utf-8', 'replace'))
+            check(not (root / 'relay-state').exists(), '补全探测意外初始化凭据或数据库')
+
+            # RELAY_NO_COMPLETION=1 跳过补全安装。
+            profiles['pwsh'].write_bytes(b'\xef\xbb\xbf' + b"Write-Host 'pwsh-profile'\n")
+            profiles['ps'].write_bytes(b'\xff\xfe' + "Write-Host 'ps-profile'\n".encode('utf-16-le'))
+            install(overrides={'RELAY_NO_COMPLETION': '1'})
+            check(marker_count(profiles['pwsh'].read_bytes()) == 0, '跳过安装仍在 pwsh profile 写入补全')
+            check(marker_count(profiles['ps'].read_bytes()) == 0, '跳过安装仍在 ps profile 写入补全')
+
+            # 任一 profile 是链接时，两个 profile 都不被修改，安装失败。
+            profiles['pwsh'].write_bytes(b'\xef\xbb\xbf' + b"Write-Host 'pwsh-profile'\n")
+            profiles['ps'].write_bytes(b'\xff\xfe' + "Write-Host 'ps-profile'\n".encode('utf-16-le'))
+            link_target = root / 'pwsh-profile-target.ps1'
+            link_target.write_bytes(b"Write-Host 'target'\n")
+            profiles['pwsh'].unlink()
+            symlink_out = subprocess.run(
+                [shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+                 f"New-Item -ItemType SymbolicLink -Path '{str(profiles['pwsh']).replace(chr(39), chr(39)+chr(39))}' -Target '{str(link_target).replace(chr(39), chr(39)+chr(39))}'"],
+                cwd=root, env=env, capture_output=True, timeout=30)
+            if symlink_out.returncode == 0:
+                install(False)
+                check(marker_count(link_target.read_bytes()) == 0, '链接目标被写入补全')
+                check(marker_count(profiles['ps'].read_bytes()) == 0, '任一 profile 为链接时另一个仍被修改')
+            else:
+                print('跳过符号链接保护测试：当前进程无创建符号链接权限', file=sys.stderr)
+                profiles['pwsh'].write_bytes(b'\xef\xbb\xbf' + b"Write-Host 'pwsh-profile'\n")
+        else:
+            bashrc = root / '.bashrc'
+            posix_marker = '# RELAY:START completion'
+            bashrc_text = bashrc.read_text(encoding='utf-8')
+            check(bashrc_text.count('# Relay') == 1, 'PATH 配置重复写入')
+            check(bashrc_text.count(posix_marker) == 1, 'bash 补全块数量异常')
+            quoted_target = str(target).replace("'", "'\\''")
+            check(quoted_target in bashrc_text, 'bash 补全未写入绝对路径')
+            probe = subprocess.run(['bash', '-c', '. "$HOME/.bashrc"; command -v relay'], env=env, capture_output=True, text=True)
+            check(probe.returncode == 0 and probe.stdout.strip() == str(target),
+                  '含空格/单引号的 PATH 设置无效: ' + repr(bashrc_text) + repr(probe.stderr) + repr(probe.stdout))
+
+            # 幂等升级与私有仓库下载。
+            install()
+            check(bashrc.read_text(encoding='utf-8').count(posix_marker) == 1, '重复安装使 bash 补全块重复')
+            install(overrides={'RELAY_DOWNLOAD_MODE': 'gh'})
+            check(bashrc.read_text(encoding='utf-8').count(posix_marker) == 1, 'gh 安装使 bash 补全块重复')
+
+            # zsh 配置：写入 .zshrc，并只在没有 compdef 时初始化 compinit。
+            zshrc = root / '.zshrc'
+            install(overrides={'SHELL': '/bin/zsh', 'RELAY_SKIP_SKILLS': '1'})
+            zsh_text = zshrc.read_text(encoding='utf-8')
+            check(zsh_text.count(posix_marker) == 1, 'zsh 补全块数量异常')
+            check('compinit -C' in zsh_text, 'zsh 补全缺少 compinit 初始化')
+            check('completion zsh' in zsh_text, 'zsh 补全 eval 行缺失')
+
+            # fish 配置：写入 fish 补全文件，重复安装保持幂等。
+            fish_file = root / '.config' / 'fish' / 'completions' / 'relay.fish'
+            install(overrides={'SHELL': '/usr/bin/fish', 'RELAY_SKIP_SKILLS': '1'})
+            fish_text = fish_file.read_text(encoding='utf-8')
+            check(fish_text.count(posix_marker) == 1, 'fish 补全块数量异常')
+            check('complete -c relay' in fish_text, 'fish 补全文件缺少 complete 命令')
+            install(overrides={'SHELL': '/usr/bin/fish', 'RELAY_SKIP_SKILLS': '1'})
+            check(fish_file.read_text(encoding='utf-8').count(posix_marker) == 1, '重复安装使 fish 补全块重复')
+
+            # 已存在且无标记的 fish 文件：保留用户内容并告警，安装仍成功。
+            fish_file.parent.mkdir(parents=True, exist_ok=True)
+            fish_file.write_text('complete -c relay -l myflag\n', encoding='utf-8')
+            install(overrides={'SHELL': '/usr/bin/fish', 'RELAY_SKIP_SKILLS': '1'})
+            check(fish_file.read_text(encoding='utf-8') == 'complete -c relay -l myflag\n', '用户定制 fish 补全被覆盖')
+
+            # fish 补全文件是符号链接时不跟随写入（保留目标、安装成功）。
+            fish_link_target = root / 'fish-target.fish'
+            fish_link_target.write_text('complete -c relay -l custom\n', encoding='utf-8')
+            fish_file.unlink()
+            try:
+                fish_file.symlink_to(fish_link_target)
+                install(overrides={'SHELL': '/usr/bin/fish', 'RELAY_SKIP_SKILLS': '1'})
+                check(fish_link_target.read_text(encoding='utf-8').count(posix_marker) == 0, 'fish 符号链接目标被写入补全')
+                fish_file.unlink()
+                fish_file.write_text('complete -c relay -l custom\n', encoding='utf-8')
+            except OSError:
+                print('跳过 fish 符号链接测试：无法创建符号链接', file=sys.stderr)
+                fish_file.write_text('complete -c relay -l custom\n', encoding='utf-8')
+
+            # RELAY_NO_COMPLETION=1 跳过补全，但 PATH 持久化仍进行。
+            skip_home = root / 'skip-home'
+            skip_home.mkdir(parents=True, exist_ok=True)
+            install(overrides={'SHELL': '/bin/bash', 'HOME': str(skip_home),
+                               'RELAY_INSTALL_DIR': str(root / 'skipbin'), 'RELAY_NO_COMPLETION': '1',
+                               'RELAY_SKIP_SKILLS': '1'})
+            skip_rc = skip_home / '.bashrc'
+            skip_text = skip_rc.read_text(encoding='utf-8')
+            check(skip_text.count('# Relay') == 1, '跳过补全时 PATH 未持久化')
+            check(skip_text.count(posix_marker) == 0, '跳过补全仍写入 bash 补全块')
+
+        # 校验失败、下载失败与用户修改保护（原始逻辑保持）。
         checksums.write_text('0' * 64 + '  ' + asset + '\n', encoding='ascii')
         install(False)
         check(target.read_bytes() == binary.read_bytes(), '校验失败破坏了旧版本')
@@ -146,7 +300,7 @@ else: shutil.copyfile(Path(os.environ['RELAY_TEST_FIXTURES']) / args[args.index(
         install(False)
         check(skill.read_text(encoding='utf-8') == '用户定制 Skill', '安装器覆盖了用户定制 Skill')
         check(not (root / 'relay-state').exists(), '安装意外初始化凭据或数据库')
-        print('安装器验证通过：首次安装、PATH、自动 Skill、幂等升级、校验/下载失败、用户修改保护。')
+        print('安装器验证通过：安装、PATH、补全写入/幂等/跳过/链接保护、自动 Skill、校验/下载失败、用户修改保护。')
 
 
 if __name__ == '__main__':

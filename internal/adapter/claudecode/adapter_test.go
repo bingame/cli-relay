@@ -33,8 +33,16 @@ func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
 		t.Fatal("回调模式不应向进程环境注入凭据")
 	}
 	var settings map[string]any
-	if json.Unmarshal(artifact.Content, &settings) != nil || settings["apiKeyHelper"] != "relay secret get claude "+p.ID {
-		t.Fatal("未生成 apiKeyHelper")
+	if json.Unmarshal(artifact.Content, &settings) != nil {
+		t.Fatal("渲染产物不是合法 JSON")
+	}
+	helper, ok := settings["apiKeyHelper"].(string)
+	if !ok || !strings.HasPrefix(helper, "relay --home ") || !strings.HasSuffix(helper, " secret get claude "+p.ID) {
+		t.Fatalf("apiKeyHelper 未绑定渲染时的数据目录: %#v", settings["apiKeyHelper"])
+	}
+	absRoot, _ := filepath.Abs(root)
+	if !strings.Contains(helper, absRoot) {
+		t.Fatalf("apiKeyHelper 缺少当前 --home: %q", helper)
 	}
 	pluginPath := filepath.Join(filepath.Dir(artifact.Path), "handoff-plugin")
 	if !reflect.DeepEqual(launch.Args, []string{"--setting-sources", "", "--plugin-dir", pluginPath, "--settings", artifact.Path}) {
@@ -118,7 +126,8 @@ func TestRenderStripsInheritedClaudeCredentials(t *testing.T) {
 			t.Fatalf("渲染产物不应包含凭据字段 %s", key)
 		}
 	}
-	if env["SAFE_FLAG"] != "yes" || settings["apiKeyHelper"] != "relay secret get claude "+p.ID {
+	helper, _ := settings["apiKeyHelper"].(string)
+	if env["SAFE_FLAG"] != "yes" || !strings.HasPrefix(helper, "relay --home ") || !strings.HasSuffix(helper, " secret get claude "+p.ID) {
 		t.Fatal("未保留非凭据设置或未生成 Relay apiKeyHelper")
 	}
 	launch, err := a.BuildLaunchInputs(artifact, nil)

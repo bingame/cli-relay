@@ -6,7 +6,7 @@ Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供�
 
 ## 安装
 
-发行产物为无运行时依赖的预编译二进制，支持 Linux/macOS amd64、arm64 与 Windows amd64。安装器自动校验 SHA-256、配置 PATH，并为本机 Claude Code/Codex 安装 Handoff Skill。
+发行产物为无运行时依赖的预编译二进制，支持 Linux/macOS amd64、arm64 与 Windows amd64。安装器自动校验 SHA-256、配置 PATH、安装 Handoff Skill，并把 `relay` 命令补全写入用户 shell 配置，因此新窗口会自动加载 Tab 补全。
 
 **当前从私有仓库 `bingame/cli-relay` 分发。** 有仓库访问权限并已 `gh auth login` 的用户可从最新稳定 Release 一行安装，不必准备新域名：
 
@@ -32,7 +32,7 @@ Windows PowerShell：
 irm https://github.com/bingame/cli-relay/releases/latest/download/install.ps1 | iex
 ```
 
-Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。
+Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。补全会写入当前用户配置：PowerShell 的 `Documents\PowerShell` 与 `Documents\WindowsPowerShell` profile、bash/zsh 的 rc 文件或 fish 补全文件，重开终端即生效；单独运行 `relay completion powershell` 只打印脚本，不会注册补全。
 
 已有 Homebrew/Scoop 的用户，在软件源完成配置后可使用：
 
@@ -52,7 +52,7 @@ go install github.com/bingame/cli-relay/cmd/relay@latest
 relay skill install
 ```
 
-`go install` 或手动解压不会执行安装后钩子。重复运行一行命令可升级；设置 `RELAY_VERSION=v0.1.0` 可固定版本，`RELAY_INSTALL_DIR` 可指定绝对安装目录。更多安装选项见发布说明。
+`go install` 或手动解压不会执行安装后钩子，也不会配置补全；需要执行 `relay skill install` 并把补全写入 shell 配置。重复运行一行命令可升级；设置 `RELAY_VERSION=v0.1.0` 可固定版本，`RELAY_INSTALL_DIR` 可指定绝对安装目录，`RELAY_NO_COMPLETION=1` 可跳过补全配置。更多安装选项见发布说明。
 
 ## 源码构建与快速开始
 
@@ -139,7 +139,7 @@ relay run claude --provider example -- --append-system-prompt-file ./CLAUDE.md
 
 导入的非敏感 Claude settings 经渲染文件传入；API key 和自定义敏感 header 只通过环境注入。`switch` 用 `.relay-managed.json` 记录管理字段，保留其他用户字段，发现管理字段被手工改动时拒绝覆盖。
 
-Codex 默认使用 `-c` 内联非敏感供应商定义，未执行 switch 也可临时运行。可选 `--codex-launch-mode profile` 或 `RELAY_CODEX_LAUNCH_MODE=profile`；需先 switch 安装独立 profile。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
+Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME/<id>.config.toml`），未执行 switch 也可临时运行；`BuildLaunchInputs` 会把 `[model_providers.<id>]` 注册进 `~/.codex/config.toml` 并安装 profile 文件。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 已废弃（保留 flag 兼容，不再影响行为）。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
 
 **模型映射只在供应商真的声明过时才生效**：从 cc-switch 导入时，只有源里的「模型映射」非空才会写入 `provider_models`，进而在 Codex 侧渲染 `model_catalog_json`、在 Claude Code 侧渲染 `modelPicker`；没有声明就不渲染任何模型列表，把模型发现交回 CLI 原生机制（Codex 自己拉 `/v1/models`，Claude Code 用内置菜单与原生环境变量）。手工 `provider add --model X` 属于用户显式声明，会写入一条模型记录。逐模型可编辑的字段与 cc-switch 一致：Codex 是显示名、请求模型、上下文窗口、思考档位；Claude Code 是显示名、请求模型、1M 上下文与默认兜底模型。
 
@@ -187,7 +187,7 @@ relay provider render-env codex example --format json | \
   --custom-env-stdin
 ```
 
-`render-env` 是敏感输出，不要打印到共享终端、CI 日志或长期文件。Multica 会按它自己的存储规则持有这些配置；Relay 不会替 Multica 管理后续密钥生命周期。
+`render-env` 的 JSON 输出包含 `env`（要注入的变量）和 `unset`（要先从进程环境中删除的变量，如 `ANTHROPIC_AUTH_TOKEN`）。**Multica 合并输出前必须先删除 `unset` 列出的变量**，否则继承的旧凭据会覆盖回调凭据。`render-env` 是敏感输出，不要打印到共享终端、CI 日志或长期文件。Multica 会按它自己的存储规则持有这些配置；Relay 不会替 Multica 管理后续密钥生命周期。
 
 若只替换可执行文件路径，可以把同一二进制复制或链接为 `relay-codex` / `relay-claude`（Windows 加 `.exe`）。Relay 根据文件名进入包装模式，`RELAY_PROVIDER` 指定供应商，未设置则用 current。把 Multica 的原生可执行文件路径指向这个实际文件；**不要把带参数的整串命令填进可执行文件路径字段**。
 
@@ -205,7 +205,7 @@ Claude 接入还受其 settings 隔离限制：Multica 写入工作目录的 `CL
 默认 `~/.relay/`，通过 `--home` / `RELAY_HOME` 改变。数据库、渲染产物、current、sessions 和实例记录都存于该目录。
 
 - AES-256-GCM 加密每条凭据；供应商 ID/字段名绑定为认证上下文，MCP/prompts 快照也加密。
-- 首选系统 keyring 保存随机主密钥。不可用时提示设置至少 12 字符口令，以 Argon2id、随机 salt 与机器身份派生主密钥；无人值守可提供 `RELAY_PASSPHRASE`，该变量不会传给模型 CLI。
+- 首选系统 keyring 保存随机主密钥。不可用时提示设置至少 12 字符口令，以 Argon2id、随机 salt 与机器身份派生主密钥；无人值守可提供 `RELAY_PASSPHRASE`。默认情况下该变量不会传给模型 CLI；**仅当供应商使用 callback 密钥模式时**，Relay 会把它显式注入子进程环境，供子进程内部的 `relay secret get` 回调解锁使用（无系统密钥库环境下必需），同时加入输出脱敏列表。
 - 已建密钥库不会静默换后端。口令、系统 keyring 或机器身份变化可能导致无法解密；本版尚无跨机器密钥迁移命令。备份必须保留对应密钥访问能力。
 - 配置产物不含明文 API key。Unix 私有目录/文件为 0700/0600；Windows 为当前用户和 SYSTEM 设置 ACL。
 - 导入器限制 SQL 语句能力和大小，拒绝 ATTACH、触发器、虚拟表、文件函数和危险 PRAGMA；不会把原始 SQL 错误内容打印出来。

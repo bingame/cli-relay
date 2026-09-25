@@ -73,6 +73,17 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 		if e != nil {
 			return process.Options{}, e
 		}
+		// 回调式密钥由子进程内部的 relay secret get 再解密一次；process.Environment 默认
+		// 会剥掉 RELAY_PASSPHRASE，无系统密钥库环境下回调会因无法解锁而失败。
+		// 因此在口令来源明确时（RELAY_PASSPHRASE 环境变量）按 overlay 重新注入，覆盖
+		// 默认的剥离行为；无口令环境（系统密钥库）则维持原样，子进程不解锁。
+		if pass := os.Getenv("RELAY_PASSPHRASE"); pass != "" && p.EffectiveSecretMode() == "callback" {
+			if inputs.Env == nil {
+				inputs.Env = map[string]string{}
+			}
+			inputs.Env["RELAY_PASSPHRASE"] = pass
+			values = append(values, pass)
+		}
 		for k, v := range sec {
 			if k == "api_key" || strings.HasPrefix(k, "env:") {
 				if v != "" {

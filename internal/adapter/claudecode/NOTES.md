@@ -29,3 +29,9 @@
 ## 验证
 
 `go test ./internal/adapter/claudecode` 覆盖无密钥产物、环境注入与清理、双重身份拒绝、原生协议归一化、路径校验、配置合并、过期管理字段清理、幂等切换以及手工编辑冲突保护。测试仅使用虚构凭据和 `t.TempDir()`。
+
+
+## 2026-09-24：回调绑定数据目录 + 口令透传机制
+
+- **回调绑定 --home**：`apiKeyHelper` 从 `relay secret get claude <id>` 改为 `relay --home '<abs-relay-root>' secret get claude <id>`。Multica/relay-codex 等外部启动方式可能不带 `--home`，不传则会解析到默认 `~/.relay`，同名供应商下可能读错密钥。路径经 POSIX 单引号转义，支持空格与单引号。
+- **RELAY_PASSPHRASE 透传**：`process.Environment` 默认会剥掉 `RELAY_PASSPHRASE`，但 callback 模式下子进程内部的 `relay secret get` 需要再次解锁密钥库。无系统密钥库环境下，Relay 在 `BuildLaunchInputs` 之后把口令按 overlay 重新注入子进程环境（覆盖默认剥离行为），并加入输出脱敏列表。有系统密钥库时口令为空，不注入，子进程走 keyring 解锁。

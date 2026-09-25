@@ -116,6 +116,33 @@ func TestNativeConfigMappingAndCredentialRejection(t *testing.T) {
 	}
 }
 
+func TestCallbackBindsRelayHome(t *testing.T) {
+	a := New()
+	a.NativeHome = t.TempDir()
+	root := t.TempDir()
+	artifact, err := a.Render(sampleProvider(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := decodeTOML(t, artifact.Content)
+	id, _ := names(artifact.ProviderID)
+	def := config["model_providers"].(map[string]any)[id].(map[string]any)
+	auth, ok := def["auth"].(map[string]any)
+	if !ok || auth["command"] != "relay" {
+		t.Fatalf("回调配置缺失: %#v", def["auth"])
+	}
+	args, _ := auth["args"].([]any)
+	absRoot, _ := filepath.Abs(root)
+	got := make([]string, 0, len(args))
+	for _, v := range args {
+		got = append(got, v.(string))
+	}
+	want := []string{"--home", absRoot, "secret", "get", "codex", artifact.ProviderID}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("回调未绑定数据目录: %q != %q", got, want)
+	}
+}
+
 func TestNamesDoNotCollide(t *testing.T) {
 	seenNames, seenEnv := map[string]bool{}, map[string]bool{}
 	for _, id := range []string{"a-b", "a_b", "A_B", "A-b"} {
