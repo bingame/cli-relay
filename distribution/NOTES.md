@@ -18,7 +18,7 @@
 
 ## 安装行为
 
-- 默认选择最新稳定 Release，也可用 `RELAY_VERSION=v0.1.0` 固定版本。下载二进制前先把 latest 解析为具体 tag，避免并发发布时混用版本。仅允许 HTTPS 下载。
+- 默认选择最新稳定 Release，也可用 `RELAY_VERSION=v0.1.0` 固定版本。公开模式直接通过 GitHub 的 `releases/latest/download` 下载资产，避免匿名调用 GitHub API 触发出口 IP 限流；私有模式仍由 `gh` 解析具体 tag。仅允许 HTTPS 下载。
 - `RELAY_DOWNLOAD_MODE=direct` 为默认公开 HTTPS 下载，`gh` 模式通过已登录 GitHub CLI 读取和下载私有 Release；授权失败直接报错，不自动尝试其他凭据。Homebrew/Scoop 的默认资源 URL 为公开地址，私有部署先使用 gh 安装器，不把软件源清单生成视为匿名软件源已可用。
 - POSIX 默认创建 `~/.local/bin`，不可写才回退 `/usr/local/bin` 并显示 sudo 提示；可通过 `RELAY_INSTALL_DIR` 指定绝对目录。SHA-256 校验后解包并同目录原子替换。用户 shell 为 bash/zsh 时持久化到对应 rc 文件，否则写 `.profile`。`curl | sh` 无法改变父 shell 的环境，当前终端需要执行输出的 `export`，或重新打开终端。
 - Windows 默认 `%LOCALAPPDATA%\Relay\bin`，SHA-256 校验后同卷替换，更新当前进程及用户 PATH。不调用 `setx`，避免 PATH 截断、展开或混入系统 PATH。只发布 amd64，不把其他架构误报成 amd64。
