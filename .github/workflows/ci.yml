@@ -46,6 +46,7 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then extension='.exe'; fi
           go build -trimpath -o "bin/relay$extension" ./cmd/relay
           python scripts/test_installers.py --binary "bin/relay$extension"
+          python scripts/test_uninstallers.py
           if [ "$RUNNER_OS" = Windows ]; then
             python scripts/test_installers.py --binary "bin/relay$extension" --powershell pwsh
           fi

@@ -4,7 +4,7 @@
 
 ## 2026-09-22：模型目录只承载真实声明，两侧对齐（Spec v0.10）
 
-- 现象（用户反馈）：cc-switch 里「模型映射」留空的渠道，经 Relay 启动后模型仍被映射/锁死，例：Codex 的 `axonhub-any`。
+- 现象（用户反馈）：cc-switch 里「模型映射」留空的渠道，经 Relay 启动后模型仍被映射/锁死。
 - 根因三处（都是把「默认模型」当成「模型目录」）：导入器在无 `modelCatalog` 时用 `Provider.Model` 伪造一条 `provider_models`；CodexAdapter 渲染条件是 `len(models) > 0 || p.Model != ""`；ClaudeCodeAdapter 无条件写 `modelPicker`（`replaceBuiltInOptions: true` 等于替换内置菜单）。
 - 修正：`provider_models` 只承载源里真实声明的模型目录，为空就不渲染任何目录类字段——导入器删除伪造分支、按 `settings_config.modelCatalog` 逐条导入；CodexAdapter 改为 `if len(models) > 0` 才写 `model_catalog_json`（不写时 Codex 自己拉 `/v1/models`，与 cc-switch「模型映射留空就不生成 catalog」一致）；ClaudeCodeAdapter 同样加 gating，模型选择交回原生菜单与 `ANTHROPIC_DEFAULT_*` 环境变量。`relay provider add --model X` 仍写入一条记录，属于用户显式声明，是刻意保留的非对称。
 - 新增 `provider_models` 列 `reasoning_levels`、`default_reasoning_level`，对齐 cc-switch「模型映射」里用户可编辑的思考档位：渲染时按 Codex canonical 顺序（`none<minimal<low<medium<high<xhigh<max<ultra`）替换条目的支持档位、丢弃未知值，默认档走「声明 → 模板默认 → 最高」三级回落。spec §5.2.1 首次写明「可编辑字段边界」（Codex：显示名/请求模型/上下文窗口/思考档位；Claude Code：显示名/请求模型/1M 上下文/默认兜底模型），其余字段沿用 CLI 原生默认值，Relay 不提供编辑面。
@@ -15,11 +15,11 @@
 
 ## 2026-09-22：Codex 模型目录（`model_catalog_json`）按 Codex 原生 schema 重写（Spec v0.9）
 
-- 现象：`relay run codex --provider axonhub-codex` 在 codex-cli 0.155.1 上 `Error loading configuration: failed to parse model_catalog_json path ...: missing field `slug``。根因是渲染的 catalog 用了 Relay 自拟结构（只有模型 ID），而该文件是 Codex 的完整模型定义目录。
+- 现象：某 Codex 第三方供应商在 codex-cli 0.155.1 上出现 `Error loading configuration: failed to parse model_catalog_json path ...: missing field `slug``。根因是渲染的 catalog 用了 Relay 自拟结构（只有模型 ID），而该文件是 Codex 的完整模型定义目录。
 - 实测确定契约：必需字段 `slug`/`display_name`/`supported_reasoning_levels`/`shell_type`/`visibility`/`supported_in_api`/`priority`/`support_verbosity`/`truncation_policy`/`experimental_supported_tools` + `base_instructions`（或 `model_messages.instructions_template`）；条目是 slug 的替代、无内置继承；设置该文件后 Codex 不再拉取 `/v1/models`；供应商网关实测 `GET /v1/models` 返回 200（26 个模型，仅一次 GET，未打印密钥）。
 - 新增 `internal/adapter/codex/catalog.go`：内置中性模板（形态与 cc-switch 为非官方模型生成的 `cc-switch-model-catalog.json` 一致，`shell_type = "shell_command"`，不声明 `apply_patch_tool_type`/`web_search_tool_type`/`tools`/`model_messages`，避免第三方 `/responses` 网关拒绝 freeform `apply_patch`），逐模型克隆并覆写 `slug`/`display_name`/`description`/`context_window`/`max_context_window`/`priority`（`1000 + 序号`）；供应商默认模型始终入目录；profile 声明的 `model_reasoning_effort` 并入该条目的支持档位；渲染前逐条自检必需字段，无可渲染模型时不写 catalog 也不设该配置项。
 - 测试：`internal/adapter/codex/catalog_test.go` 覆盖原生字段形态、不含 freeform 工具声明、默认模型必在目录内、上下文窗口优先级（模型记录 > `codex_config` > 128000）、推理档位补齐与未知档位忽略、条目独立性、重复/空模型整理、无可用模型时不写 catalog、缺字段拒绝渲染。
-- 端到端复核：用真实库中的 `axonhub-codex` 记录跑 `Render` + `BuildLaunchInputs`，产出的 profile/catalog 交给本机 `codex.exe`（仅把 `base_url` 指向本地假服务、`auth.command` 换成占位环境变量，未请求真实网关、未使用真实凭据）：退出 0、`turn.completed`、`model=gpt-6-astra`、`reasoning.effort=low`、instructions 117 字符、工具集无 `apply_patch`。
+- 端到端复核：用真实库中的第三方供应商记录跑 `Render` + `BuildLaunchInputs`，产出的 profile/catalog 交给本机 `codex.exe`（仅把 `base_url` 指向本地假服务、`auth.command` 换成占位环境变量，未请求真实网关、未使用真实凭据）：退出 0、`turn.completed`、模型和推理档位均正确、工具集无 `apply_patch`。
 - 本次未做的：`/v1/models` 拉取与模型同步（用户明确选择"只修 catalog"）。当时的现状是 `provider_models` 里有什么就渲染什么，未导入模型列表的供应商只渲染 `provider.Model` 一条——**该行为已在同日 v0.10 修正**：未声明模型目录的供应商不再渲染目录（见上一节）。
 - 验收：`go test ./...`、`go vet ./...` 全过。
 
@@ -43,7 +43,7 @@
 ## 安装与分发补充
 
 - 增加 GoReleaser v2.9.0 配置、三系统 CI 和 tag 发布工作流；五平台 CGO=0 归档、Windows 裸 exe、SHA-256、Homebrew formula、Scoop manifest 由同一配置生成。版本固定原因见 `distribution/NOTES.md`。
-- 一行安装器支持公开 HTTPS 和现有私有仓库的 `RELAY_DOWNLOAD_MODE=gh`；先校验再原子替换，PATH 配置、升级、自动 Skill 安装都有明确失败行为。用户已确认先使用现有 `bingame/cli-relay`，不要求新域名上线。
+- 一行安装器支持公开 HTTPS 和私有镜像的 `RELAY_DOWNLOAD_MODE=gh`；先校验再原子替换，PATH 配置、升级、自动 Skill 安装都有明确失败行为。
 - `InstallSkill(targetDir string) error` 加入两个 Adapter；`relay skill install [--cli claude,codex]` 自动探测、离线安装，支持原生配置目录覆盖、幂等升级和用户修改保护，不初始化数据库或凭据库。
 - 修复 Claude 隔离设置关闭用户 Skill 发现的问题：只额外加载 Relay 内嵌 Handoff 插件，保留供应商隔离。真实 Claude + 本地假服务验证 Skill 可见且使用正确的虚构凭据；复现入口 `scripts/verify_claude_skill.py`。
 - Go 模块路径改为 `github.com/bingame/cli-relay`，支持正常模块安装；增加发布版本输出。更新规范、README、Adapter NOTES 与发布说明。

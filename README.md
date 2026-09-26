@@ -8,19 +8,7 @@ Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供�
 
 发行产物为无运行时依赖的预编译二进制，支持 Linux/macOS amd64、arm64 与 Windows amd64。安装器自动校验 SHA-256、配置 PATH、安装 Handoff Skill，并把 `relay` 命令补全写入用户 shell 配置，因此新窗口会自动加载 Tab 补全。
 
-**当前从私有仓库 `bingame/cli-relay` 分发。** 有仓库访问权限并已 `gh auth login` 的用户可从最新稳定 Release 一行安装，不必准备新域名：
-
-```sh
-gh release download --repo bingame/cli-relay --pattern install.sh --output - | RELAY_DOWNLOAD_MODE=gh sh
-```
-
-```powershell
-$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo bingame/cli-relay --pattern install.ps1 --output - | Out-String | iex
-```
-
-`Out-String` 不能省略：`gh --output -` 通过 PowerShell 原生管道输出时会产生多个逐行字符串对象，直接传给 `iex` 会逐行执行，多行函数尚未闭合时就会报“缺少右大括号”。`Out-String` 先把所有行聚合成一个完整脚本。PowerShell 安装器同时保持纯 ASCII 源码，避免原生管道按系统代码页错误解码 UTF-8 中文。私有下载复用 GitHub CLI 的登录态，不要求把 token 写到命令或文件。`gh` 仅用于私有仓库下载，Relay 本身无运行时依赖。软件源和发布配置见 [发布说明](distribution/NOTES.md)。下列 `curl`/`irm`、Homebrew/Scoop 和匿名 `go install` 路径需要公开发行资源，当前私有部署不宣称它们已上线。
-
-Linux / macOS（公开发行后可直接使用仓库地址）：
+公开仓库 `bingame/cli-relay` 从 GitHub Releases 提供安装脚本，不需要安装 GitHub CLI：
 
 ```sh
 curl -fsSL https://github.com/bingame/cli-relay/releases/latest/download/install.sh | sh
@@ -32,12 +20,32 @@ Windows PowerShell：
 irm https://github.com/bingame/cli-relay/releases/latest/download/install.ps1 | iex
 ```
 
+如果从私有镜像下载，可设置 `RELAY_DOWNLOAD_MODE=gh` 并使用已登录的 `gh`。PowerShell 通过 `gh` 输出安装脚本时必须保留 `Out-String`：
+
+```powershell
+$env:RELAY_DOWNLOAD_MODE='gh'; gh release download --repo <owner>/<repo> --pattern install.ps1 --output - | Out-String | iex
+```
+
+`gh` 只负责私有镜像的下载，Relay 不读取或输出 `gh` 的 token。软件源和发布配置见 [发布说明](distribution/NOTES.md)。
+
+卸载已安装的 Relay（会保留 `~/.relay` / `%USERPROFILE%\.relay` 数据目录和加密凭据）：
+
+```sh
+curl -fsSL https://github.com/bingame/cli-relay/releases/latest/download/uninstall.sh | sh
+```
+
+```powershell
+irm https://github.com/bingame/cli-relay/releases/latest/download/uninstall.ps1 | iex
+```
+
+如果安装时使用了 `RELAY_INSTALL_DIR`，卸载时也设置相同变量。需要删除本地供应商数据时，请先备份，再手动删除 `RELAY_HOME` 指向的目录。
+
 Unix 默认 `~/.local/bin`，Windows 默认 `%LOCALAPPDATA%\Relay\bin`。Unix 当前终端按安装输出执行 `export` 或重开终端；Windows 安装完成即可在当前 PowerShell 使用。补全会写入当前用户配置：PowerShell 的 `Documents\PowerShell` 与 `Documents\WindowsPowerShell` profile、bash/zsh 的 rc 文件或 fish 补全文件，重开终端即生效；单独运行 `relay completion powershell` 只打印脚本，不会注册补全。
 
 已有 Homebrew/Scoop 的用户，在软件源完成配置后可使用：
 
 ```sh
-brew install bingame/tap/relay
+brew install bingame/homebrew-tap/relay
 ```
 
 ```powershell

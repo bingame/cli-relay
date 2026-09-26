@@ -10,6 +10,11 @@ import zipfile
 
 def main():
     dist = Path(sys.argv[1] if len(sys.argv) > 1 else 'dist')
+    for name in ['install.sh', 'install.ps1', 'uninstall.sh', 'uninstall.ps1']:
+        path = Path(name)
+        assert path.is_file(), f'缺少发行安装脚本: {name}'
+    assert all(byte < 128 for byte in Path('install.ps1').read_bytes()), 'install.ps1 必须保持 ASCII'
+    assert all(byte < 128 for byte in Path('uninstall.ps1').read_bytes()), 'uninstall.ps1 必须保持 ASCII'
     artifacts = json.loads((dist / 'artifacts.json').read_text(encoding='utf-8'))
     checksums = {}
     for line in (dist / 'checksums.txt').read_text().splitlines():

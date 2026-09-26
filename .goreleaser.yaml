@@ -43,6 +43,8 @@ release:
   extra_files:
     - glob: install.sh
     - glob: install.ps1
+    - glob: uninstall.sh
+    - glob: uninstall.ps1
     - glob: dist/homebrew/Formula/relay.rb
     - glob: dist/scoop/relay.json
 

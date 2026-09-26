@@ -36,8 +36,8 @@
 
 ## 模型目录导入（2026-09-22）
 
-- 现象：cc-switch 里「模型映射」留空的渠道（如 Codex 的 `axonhub-any`），经 Relay 导入后仍被映射/锁定成一个模型。
-- 现场核对（`E:\GitHubNew\cc-switch` + 用户真实导出）：Codex 的模型映射**只**存在 `settings_config.modelCatalog = { models: [...] }` 里，且 cc-switch 仅在非空时生成 `cc-switch-model-catalog.json` 并设置 `model_catalog_json`；`axonhub-lite` 有 3 条，`any`/`axonhub`/`axonhub-any`/`axonhub-qd` 都是 0 条。
+- 现象：cc-switch 里「模型映射」留空的渠道，经 Relay 导入后仍被映射/锁定成一个模型。
+- 现场核对（本地 cc-switch 工作区和用户导出）：Codex 的模型映射**只**存在 `settings_config.modelCatalog = { models: [...] }` 里，且 cc-switch 仅在非空时生成 `cc-switch-model-catalog.json` 并设置 `model_catalog_json`；模型映射为空的渠道不会生成目录条目。
 - 根因（本仓库侧）：导入器在 `entry.Models` 为空时用 `Provider.Model` **伪造**一条 `provider_models`，Adapter 又据此写出 `model_catalog_json`。现已删除该伪造分支，改为 `entry.Models = append(entry.Models, codexCatalogModels(settings["modelCatalog"], entry.Provider.Model)...)`——**源里没声明就不产生任何模型记录**。
 - `codexCatalogModels` 逐条读取 cc-switch 「模型映射」表里用户可编辑的四列：`model`（trim 后作 model_id，空则跳过、重复则去重）、`displayName`、`contextWindow`、`reasoningLevels` + `defaultReasoningLevel`；`is_default` 来自 `modelID == 源里的默认模型`，`sortOrder` 按出现顺序。`catalogReasoningLevels` 只做 trim/去重（未知档位留给 Adapter 按 Codex canonical 列表过滤，与 cc-switch「声明 ∩ canonical」等价），`catalogInt` 兼容 JSON 里的 float64/int64/json.Number/字符串，非正整数一律忽略。
 - 回归测试：`TestCodexModelCatalogImport`（有 `modelCatalog` 时逐列还原，含 trim 与去重）、`TestImportDoesNotInventModelCatalog`（无 `modelCatalog` 时 `entry.Models` 必须为空且不因 `Provider.Model` 非空而出现记录）。
