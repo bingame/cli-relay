@@ -85,7 +85,11 @@ func (a *Adapter) install(artifact adapter.Artifact, nativeHome string, setDefau
 		for key, value := range profile {
 			pointers[key] = value
 		}
-		delete(pointers, "model_catalog_json")
+		// 切回未声明模型目录的供应商时，清除上一个全局默认留下的目录指针，
+		// 让 Codex 恢复原生模型发现。
+		if _, ok := pointers["model_catalog_json"]; !ok {
+			pointers["model_catalog_json"] = nil
+		}
 		// 新版 Codex 对旧顶层 profile 指针直接报错；switch 仅移除指针，保留旧 profile 内容。
 		pointers["profile"] = nil
 		base, err = setTopLevelValues(base, pointers)

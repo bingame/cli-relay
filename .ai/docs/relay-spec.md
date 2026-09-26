@@ -285,7 +285,7 @@ Codex 支持三种密钥来源（官方文档确认），Relay 只使用前两�
    refresh_interval_ms = 0   # 见下方说明: relay secret get 本地读 keychain, 快且稳定, 0 是官方建议的最合适取值
    ```
    `refresh_interval_ms = 0` 的含义是禁用主动定时刷新，只在认证重试时才重新执行命令（不是"只调用一次"）；这要求 `relay secret get` **只把 token 打到 stdout，任何诊断/调试信息必须走 stderr**，哪怕一行调试日志混进 stdout 也会被 Codex 当作 token 的一部分，这条要写进实现约束，不能只在文档里提一句。
-2. **`model_provider`/`model`/`model_catalog_json` 选择器 → 写进独立的 profile 文件 `$CODEX_HOME/<id>.config.toml`**（`--profile <id>` 真正加载的就是这个文件，不是主配置文件里的某个小节）：
+2. **`model_provider`/`model`/`model_catalog_json` 选择器 → 写进独立的 profile 文件 `$CODEX_HOME/<id>.config.toml`**（`--profile <id>` 真正加载的就是这个文件，不是主配置文件里的某个小节）。执行 `switch` 时，Relay 会把同一组选项同步到主配置顶层；这样不带 `--profile` 直接启动 `codex` 也使用当前供应商，临时 `run`/`exec` 则只依赖独立 profile：
    ```toml
    model_provider     = "<id>"
    model               = "<model>"
@@ -322,7 +322,7 @@ Codex 支持三种密钥来源（官方文档确认），Relay 只使用前两�
 - `env_key` 降级路径（可选，用户主动要求时启用）：产出 `env_key = "RELAY_<ID>_KEY"`（不含明文），`buildLaunchInputs()` 才需要现算 `env = { "RELAY_<ID>_KEY": <明文> }` 注入子进程；**必须验证** `RELAY_<ID>_KEY` 出现在 Codex 自己的 `shell_environment_policy`/env allowlist 里，若 Codex 版本要求显式声明允许的变量名前缀，需在 `applyGlobal()` 时一并写入这条配置，并在集成测试里覆盖「设置了变量但 Codex 读不到」这个已知坑。`auth.command`/`env_key`/`experimental_bearer_token` 三者互斥，不能同时配置（官方文档明确要求），Relay 也明确不生成 `experimental_bearer_token`。
 - **额外发现的功能性差异（不只是安全考虑）**：部分 OpenAI 兼容中转站文档提到，用 `env_key` 模式时 Codex 不会主动拉取该 provider 的模型目录，非官方模型会出现"Unknown model"警告；用 `auth.command` 模式则没有这个问题。Relay 因为自己能声明模型目录（供应商真的给出「模型映射」时渲染成 `model_catalog_json`；未给出时交给 Codex 自己发现），不依赖 Codex 主动拉取，所以这一点对 Relay 不是刚需，但作为默认选 `auth.command` 的又一个佐证列在这里。
 - `buildLaunchInputs()`（两种密钥模式通用）：`argv = ["--profile", id]`（现已确认对应 `$CODEX_HOME/<id>.config.toml` 这个独立文件，见上方产物结构说明）。
-- `applyGlobal()`（对应 `switch`，与 `run`/`exec` 走的路径不同）：把 `[model_providers.<id>]`（含 `.auth`）写/更新进主配置文件 `~/.codex/config.toml` 的注册表部分（这一步 `switch`/`run`/`exec` 都需要，保证 provider 已定义），然后**额外在主配置文件顶层直接设置 `model_provider = "<id>"`、`model = "<model>"`**——这才是真正"不带任何 flag 直接跑 `codex` 也生效"的全局默认，和 `run`/`exec` 用的 `--profile` 选择器文件是两条不同路径，不要合并成一个。
+- `applyGlobal()`（对应 `switch`，与 `run`/`exec` 走的路径不同）：把 `[model_providers.<id>]`（含 `.auth`）写/更新进主配置文件 `~/.codex/config.toml` 的注册表部分（这一步 `switch`/`run`/`exec` 都需要，保证 provider 已定义），然后**额外在主配置文件顶层直接设置 `model_provider = "<id>"`、`model = "<model>"`；供应商声明过模型目录时同时设置 `model_catalog_json`**——这才是真正"不带任何 flag 直接跑 `codex` 也生效"的全局默认，和 `run`/`exec` 用的 `--profile` 选择器文件是两条不同路径，不要合并成一个。
 - `resumeArgs(id)`：视 Codex 当前版本的 resume 子命令语法而定（`exec resume <id>` 或 `--resume <id>`），实现前需在目标 Codex 版本上验证一次，不要假设语法长期不变。**同时注意 §0.1 第 1 点的结论：跨 provider 场景下即使拿到了正确的 resume 语法，也应默认走 Handoff 而非直接 resume，resumeArgs 主要服务于同 provider 内的场景和 Handoff 第 2 级 fallback。**
 
 ### 5.2.1 模型目录的可编辑字段边界（与 cc-switch 对齐）

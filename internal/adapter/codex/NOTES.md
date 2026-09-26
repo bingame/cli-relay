@@ -49,7 +49,7 @@
 - `Extra.codex_config` 接受已解析的原生 TOML 对象，按原 `model_provider` 选择供应商定义；仅映射模型与供应商相关字段，不从导入配置传播执行审批、安全沙箱或 shell 环境策略。`Provider.BaseURL`、`Provider.Model` 优先。
 - Provider 经 SQLite JSON 列往返后数字会变为 Go `float64`，直接编码会生成原生整数配置不接受的 `3.0`。适配器对重试、超时、上下文窗口和自动压缩阈值这些已知整数字段恢复整数类型，并拒绝负数、小数或失去精度的浮点值；单元测试和本机假 SSE 测试均覆盖 JSON 往返路径。
 - 明文字段（如 `api_key`、`experimental_bearer_token`、`http_headers`）拒绝渲染；默认主凭据走 `auth.command`，`env_key` 仅为显式降级模式。额外 header 仍用 `env_http_headers` 环境变量名映射和加密存储中的 `env:NAME`。配置产物和 argv 不含凭据。
-- `ApplyGlobal` 使用 TOML 语法树修改已有顶层模型指针，保留同行注释、无关设置和多行字符串；供应商区块由 `BEGIN/END RELAY CODEX` 注释管理。拒绝覆盖同名的手动供应商或独立 profile。文件按安全写入接口替换，并使用配置锁避免多个 Relay 进程同时修改。
+- `ApplyGlobal` 使用 TOML 语法树修改已有顶层模型指针，保留同行注释、无关设置和多行字符串；供应商区块由 `BEGIN/END RELAY CODEX` 注释管理。供应商声明过模型目录时，`switch` 同时把 `model_catalog_json` 写入主配置，确保用户直接启动 `codex`（不带 `--profile`）也能看到模型列表。拒绝覆盖同名的手动供应商或独立 profile。文件按安全写入接口替换，并使用配置锁避免多个 Relay 进程同时修改。
 - 额外实测发现：Codex 0.154.0 对旧顶层 `profile = "..."` **直接拒绝启动**，错误要求改用 `--profile` 和独立 profile 文件。因此 `ApplyGlobal` 定点移除旧顶层 `profile` 赋值，保留同行注释、原独立 profile 文件以及历史 `[profiles.*]` 表。后者在当前版本不被使用，但实测保留它们不妨碍全局默认启动。
 - 可选 `LaunchMode=profile` 只读取已经安装、内容与产物相符的 `<relay_id>.config.toml`；未安装或用户修改后报错，不隐式执行全局切换。配置路径遵循显式 `NativeHome`、`CODEX_HOME`、`~/.codex` 的优先级。
 - Multica 本机代码通过 `codex app-server --listen stdio://` 使用 JSON-RPC。该入口保持参数透明，不追加 `exec` 或 `--json`；普通无头启动和 resume 则补齐 `exec` / `--json`。

@@ -248,6 +248,56 @@ func TestApplyGlobalPreservesUserConfigAndProfiles(t *testing.T) {
 	}
 }
 
+func TestApplyGlobalIncludesCatalogForDirectCodexLaunch(t *testing.T) {
+	a := New()
+	p := sampleProvider()
+	models := []provider.Model{{
+		ProviderID:  p.ID,
+		ModelID:     "test-model",
+		DisplayName: "测试模型",
+		IsDefault:   true,
+	}}
+	artifact, err := a.Render(p, t.TempDir(), models...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := a.ApplyGlobal(artifact, home); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := decodeTOML(t, data)
+	if config["model_provider"] != p.ID || config["model"] != p.Model {
+		t.Fatalf("全局 Codex 选择器错误: %#v", config)
+	}
+	catalogPath, ok := config["model_catalog_json"].(string)
+	if !ok || catalogPath == "" {
+		t.Fatal("switch 后主配置缺少 model_catalog_json，直接启动 Codex 无法加载模型列表")
+	}
+	if _, err := os.Stat(catalogPath); err != nil {
+		t.Fatalf("全局模型目录不存在: %v", err)
+	}
+
+	withoutModels, err := a.Render(p, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyGlobal(withoutModels, home); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(filepath.Join(home, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config = decodeTOML(t, data)
+	if _, ok := config["model_catalog_json"]; ok {
+		t.Fatal("切换到未声明模型目录的供应商后仍残留 model_catalog_json")
+	}
+}
+
 func TestProfileModeInstallsWithoutChangingDefault(t *testing.T) {
 	a := New()
 	a.LaunchMode, a.NativeHome = "profile", t.TempDir()

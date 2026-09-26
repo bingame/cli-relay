@@ -139,7 +139,7 @@ relay run claude --provider example -- --append-system-prompt-file ./CLAUDE.md
 
 导入的非敏感 Claude settings 经渲染文件传入；API key 和自定义敏感 header 只通过环境注入。`switch` 用 `.relay-managed.json` 记录管理字段，保留其他用户字段，发现管理字段被手工改动时拒绝覆盖。
 
-Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME/<id>.config.toml`），未执行 switch 也可临时运行；`BuildLaunchInputs` 会把 `[model_providers.<id>]` 注册进 `~/.codex/config.toml` 并安装 profile 文件。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 已废弃（保留 flag 兼容，不再影响行为）。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
+Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME/<id>.config.toml`），未执行 switch 也可临时运行；`BuildLaunchInputs` 会把 `[model_providers.<id>]` 注册进 `~/.codex/config.toml` 并安装 profile 文件。`switch` 还会把已声明的 `model_catalog_json` 写入主配置，因此直接启动 `codex`（不带 `--profile`）也能使用对应模型列表。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 已废弃（保留 flag 兼容，不再影响行为）。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
 
 **模型映射只在供应商真的声明过时才生效**：从 cc-switch 导入时，只有源里的「模型映射」非空才会写入 `provider_models`，进而在 Codex 侧渲染 `model_catalog_json`、在 Claude Code 侧渲染 `modelPicker`；没有声明就不渲染任何模型列表，把模型发现交回 CLI 原生机制（Codex 自己拉 `/v1/models`，Claude Code 用内置菜单与原生环境变量）。手工 `provider add --model X` 属于用户显式声明，会写入一条模型记录。逐模型可编辑的字段与 cc-switch 一致：Codex 是显示名、请求模型、上下文窗口、思考档位；Claude Code 是显示名、请求模型、1M 上下文与默认兜底模型。
 
