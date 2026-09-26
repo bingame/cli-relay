@@ -27,6 +27,21 @@ def marker_count(data, marker=b'# RELAY:START - Relay completion'):
     return data.count(marker)
 
 
+def long_path(path):
+    """展开 8.3 短名并统一分隔符，保证与安装器写入的规范化绝对路径一致。
+
+    CI 等环境的 TEMP 可能是 C:/Users/RUNNER~1/... 这类短路径形态，而
+    install.ps1 经 .NET GetFullPath 展开为长路径后再写入 profile。
+    """
+    if os.name != 'nt':
+        return str(path)
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, len(buf))
+    result = buf.value if 0 < length < len(buf) else str(path)
+    return result.replace('/', '\\')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', required=True)
@@ -144,7 +159,11 @@ else: shutil.copyfile(Path(os.environ['RELAY_TEST_FIXTURES']) / args[args.index(
             for name, profile in profiles.items():
                 check(profile.exists(), f'安装器未创建 {name} profile')
                 check(marker_count(profile.read_bytes()) == 1, f'{name} profile 补全块数量异常')
-                check(str(target).replace("'", "''").encode() in profile.read_bytes(), f'{name} profile 未写入绝对补全路径')
+                expected = long_path(target).replace("'", "''").encode()
+                if expected not in profile.read_bytes():
+                    print(f'诊断 {name}: target={target!r}', file=sys.stderr)
+                    print(f'诊断 {name}: profile 内容={profile.read_bytes()!r}', file=sys.stderr)
+                check(expected in profile.read_bytes(), f'{name} profile 未写入绝对补全路径')
 
             # 预置带不同编码的 profile，验证安装器保留原内容、编码和换行。
             profiles['pwsh'].write_bytes(b'\xef\xbb\xbf' + b"Write-Host 'pwsh-profile'\n")
