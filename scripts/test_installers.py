@@ -73,7 +73,7 @@ def main():
             # ReadAllLines 先关闭文件，再模拟 gh 原生管道的逐行字符串输出；Out-String 必须聚合完整脚本。
             wrapper = root / 'test.ps1'
             wrapper.write_text('''$ErrorActionPreference = 'Stop'
-function Invoke-RestMethod { param($Uri, $TimeoutSec) return @{ tag_name = 'v0.1.0' } }
+function Invoke-RestMethod { throw 'direct installer must not call Invoke-RestMethod' }
 function gh {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq 'api') { return 'v0.1.0' }

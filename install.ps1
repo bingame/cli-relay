@@ -101,16 +101,18 @@ function Install-Relay {
     if ($mode -notin @('direct', 'gh')) { throw 'RELAY_DOWNLOAD_MODE must be direct or gh' }
     if ($mode -eq 'gh' -and -not (Get-Command gh -ErrorAction SilentlyContinue)) { throw 'Private releases require an authenticated GitHub CLI (gh)' }
     $version = $env:RELAY_VERSION
+    $latest = $false
     if (-not $version -or $version -eq 'latest') {
         if ($mode -eq 'gh') {
             $version = & gh api "repos/$repository/releases/latest" --jq .tag_name
             if ($LASTEXITCODE -ne 0) { throw 'Cannot read the private release; check gh authentication and repository access' }
         } else {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/latest" -TimeoutSec 60
-            $version = $release.tag_name
+            # GitHub API has a low anonymous per-IP rate limit. Public releases expose
+            # the same files through a CDN redirect, so avoid api.github.com entirely.
+            $latest = $true
         }
     }
-    if ($version -notmatch '^v[0-9][a-zA-Z0-9.+-]*$') { throw 'Version must be a release tag starting with v, for example v0.1.0' }
+    if (-not $latest -and $version -notmatch '^v[0-9][a-zA-Z0-9.+-]*$') { throw 'Version must be a release tag starting with v, for example v0.1.0' }
     $installDir = $env:RELAY_INSTALL_DIR
     if (-not $installDir) {
         if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set; specify RELAY_INSTALL_DIR' }
@@ -122,7 +124,11 @@ function Install-Relay {
     $stage = $null
     New-Item -ItemType Directory -Path $work | Out-Null
     try {
-        $base = "https://github.com/$repository/releases/download/$version"
+        $base = if ($latest) {
+            "https://github.com/$repository/releases/latest/download"
+        } else {
+            "https://github.com/$repository/releases/download/$version"
+        }
         $asset = 'relay-windows-amd64.exe'
         $download = Join-Path $work $asset
         $checksums = Join-Path $work 'checksums.txt'
