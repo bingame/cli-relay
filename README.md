@@ -145,7 +145,7 @@ unset RELAY_INPUT_KEY
 relay run claude --provider example -- --append-system-prompt-file ./CLAUDE.md
 ```
 
-导入的非敏感 Claude settings 经渲染文件传入；API key 和自定义敏感 header 只通过环境注入。`switch` 用 `.relay-managed.json` 记录管理字段，保留其他用户字段，发现管理字段被手工改动时拒绝覆盖。
+导入的非敏感 Claude settings 经渲染文件传入；Relay 托管的 Claude 凭据走 `apiKeyHelper` 回调，不把明文密钥写入原生配置。`switch` 用 `.relay-managed.json` 记录管理字段，切换时覆盖 Relay 管理范围内的字段并保留其他用户字段；同时删除全局 `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY`，避免它们与 `apiKeyHelper` 同时存在而产生认证冲突警告。
 
 Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME/<id>.config.toml`），未执行 switch 也可临时运行；`BuildLaunchInputs` 会把 `[model_providers.<id>]` 注册进 `~/.codex/config.toml` 并安装 profile 文件。`switch` 还会把已声明的 `model_catalog_json` 写入主配置，因此直接启动 `codex`（不带 `--profile`）也能使用对应模型列表。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 已废弃（保留 flag 兼容，不再影响行为）。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
 

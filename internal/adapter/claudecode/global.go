@@ -65,9 +65,14 @@ func (*Adapter) ApplyGlobal(artifact adapter.Artifact, nativeHome string) error 
 		if err != nil {
 			return err
 		}
-		if existing, ok := getValue(current, parts); ok && equalJSON(existing, state.Fields[path]) {
-			deleteValue(current, parts)
-		}
+		// 无条件清除上一次 relay 托管的字段：即使用户在两次 switch 之间手动
+		// 修改了值，relay switch 仍应当能覆盖自己管理范围内的字段。
+		deleteValue(current, parts)
+	}
+	// 旧版 Relay 或 cc-switch 可能把凭据留在全局 env 中；它们不在管理记录里，
+	// 但优先级高于 apiKeyHelper，会导致 Claude Code 警告认证来源冲突。
+	for _, name := range claudeCredentialEnv {
+		deleteValue(current, []string{"env", name})
 	}
 	fields := map[string]any{}
 	flatten(settings, "", fields)
@@ -127,18 +132,6 @@ func decodePath(path string) ([]string, error) {
 		parts[i] = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
 	}
 	return parts, nil
-}
-
-func getValue(object map[string]any, parts []string) (any, bool) {
-	value, ok := object[parts[0]]
-	if !ok || len(parts) == 1 {
-		return value, ok
-	}
-	child, ok := value.(map[string]any)
-	if !ok {
-		return nil, false
-	}
-	return getValue(child, parts[1:])
 }
 
 func deleteValue(object map[string]any, parts []string) {

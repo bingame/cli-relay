@@ -22,16 +22,16 @@
 
 `ApplyGlobal(artifact, nativeHome)` 的 `nativeHome` 是 `.claude` 目录。JSON 不支持注释，使用同目录 `.relay-managed.json` 记录 Relay 管理的 JSON Pointer 叶子路径及最后写入值，并以 `.relay-settings.lock` 串行化切换。
 
-切换时，仅删除与上次写入值仍完全相同的旧字段，随后合并新产物；用户添加的同级字段、以及不再被当前供应商管理的手工修改均保留。首次遇到不同的既有值、或用户修改了新供应商也需要管理的字段时，明确报错且不写配置。用户可以自行调整冲突字段后重试，程序不静默覆盖。数组视为完整叶子字段，不尝试逐项猜测来源。
+切换时，先无条件清除上一次 Relay 托管过的叶子字段（即使这些字段被手工改过），随后清除全局 `env.ANTHROPIC_AUTH_TOKEN` 与 `env.ANTHROPIC_API_KEY`，再合并新产物。前一步保证 relay 始终能收回自己的管理范围；后一步兼容旧版 Relay、cc-switch 或用户手工留下的凭据变量，避免它们因优先级高于 `apiKeyHelper` 而触发认证冲突警告。用户添加的其他同级字段仍保留；新供应商需要管理、但当前已有不同用户值时仍明确报错且不写配置。数组视为完整叶子字段，不尝试逐项猜测来源。
 
 配置和管理记录均按受保护文件写入；普通写入失败时恢复配置。两个独立文件无法提供数据库式的跨文件掉电原子性：若在写入两文件之间系统崩溃，后续切换可能因管理记录不匹配而保护性报错，需人工核对文件。不会以不匹配记录强制覆盖新值。
 
 ## 验证
 
-`go test ./internal/adapter/claudecode` 覆盖无密钥产物、环境注入与清理、双重身份拒绝、原生协议归一化、路径校验、配置合并、过期管理字段清理、幂等切换以及手工编辑冲突保护。测试仅使用虚构凭据和 `t.TempDir()`。
+`go test ./internal/adapter/claudecode` 覆盖无密钥产物、环境注入与清理、双重身份拒绝、原生协议归一化、路径校验、配置合并、过期管理字段清理、继承凭据变量清理、幂等切换以及未托管字段冲突保护。测试仅使用虚构凭据和 `t.TempDir()`。
 
 
 ## 2026-09-24：回调绑定数据目录 + 口令透传机制
 
-- **回调绑定 --home**：`apiKeyHelper` 从 `relay secret get claude <id>` 改为 `relay --home '<abs-relay-root>' secret get claude <id>`。Multica/relay-codex 等外部启动方式可能不带 `--home`，不传则会解析到默认 `~/.relay`，同名供应商下可能读错密钥。路径经 POSIX 单引号转义，支持空格与单引号。
+- **回调绑定 --home**：`apiKeyHelper` 从 `relay secret get claude <id>` 改为 `relay --home '<abs-relay-root>' secret get claude <id>`。Multica/relay-codex 等外部启动方式可能不带 `--home`，不传则会解析到默认 `~/.relay`，同名供应商下可能读错密钥。路径经 POSIX 单引号转义，支持空格与单引号。回调命令按平台选择引号：Windows 上 Claude Code 用 cmd 解析 apiKeyHelper，POSIX 单引号会被当成路径字面量（报 CreateFile 语法错误），因此 Windows 下无空格路径不加引号、含空格用双引号；POSIX 平台沿用单引号。2026-10-10 在真实 Windows 环境用 `relay --home C:\Users\libin\.relay secret get claude axonhub-lite` 端到端验证回调成功。
 - **RELAY_PASSPHRASE 透传**：`process.Environment` 默认会剥掉 `RELAY_PASSPHRASE`，但 callback 模式下子进程内部的 `relay secret get` 需要再次解锁密钥库。无系统密钥库环境下，Relay 在 `BuildLaunchInputs` 之后把口令按 overlay 重新注入子进程环境（覆盖默认剥离行为），并加入输出脱敏列表。有系统密钥库时口令为空，不注入，子进程走 keyring 解锁。

@@ -1,6 +1,13 @@
 # 实现与验收记录
 
-日期：2026-09-17；最近更新：2026-09-22。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+日期：2026-09-17；最近更新：2026-10-09。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+
+## 2026-10-09：修复 Claude 全局 settings 的认证冲突警告
+
+- 现象：执行 `relay switch` 后直接启动原生 `claude`，出现 `Both ANTHROPIC_AUTH_TOKEN and apiKeyHelper set` 警告。
+- 根因：`ApplyGlobal` 只清除 `.relay-managed.json` 记录的旧字段；旧版 Relay、cc-switch 或手工配置留下的 `settings.json` `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY` 不在管理记录内，因此会与新版写入的 `apiKeyHelper` 同时保留。
+- 修正：全局合并时显式删除 `env` 中的两项 Claude 凭据环境变量；Relay 托管字段改为切换时覆盖，仍保留未托管用户字段。渲染产物和受控启动的凭据清理逻辑保持不变。
+- 测试：新增继承凭据变量清理回归测试；`go test ./internal/adapter/claudecode ./internal/cli ./internal/process` 通过。测试使用虚构凭据与临时目录，不修改真实 Claude 配置。
 
 ## 2026-09-22：模型目录只承载真实声明，两侧对齐（Spec v0.10）
 

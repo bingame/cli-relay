@@ -1,6 +1,6 @@
 # Relay 技术规格说明书 v0.11
 
-> **v0.11 变更（按真实使用反馈收敛供应商模型与导入冲突语义）**：① Target CLI 名称改为与原生 CLI 一致的 `claude`（原先的 `claude-code` 废弃），下文所有 CLI 标识、渲染目录、`secret get` 等示例均已同步。② **供应商身份由 `(target, id)` 共同决定**：`Provider` 不再持有 `targets` 数组（多 CLI 共用一条记录），改为持有单个 `target`；因此 `providers` 主键从 `(id)` 改为 `(target, id)`，并新增 `UNIQUE(target, display_name)`——**不同 CLI 可同名供应商，同一 CLI 内显示名称唯一**，导入时也不再需要为供应商名追加 CLI 后缀。③ **导入冲突直接覆盖，不再生成 `slugify(display_name-target)` + 数字后缀**：以 `(target, id)` 为匹配键，`source = "manual"` 的记录同样参与覆盖（与 cc-switch 的覆盖行为一致），`conflict_renamed` 信号废弃，用户可放心清库重导，本版不做迁移与向下兼容。④ Claude Code 认证冲突警告：渲染产物与 `BuildLaunchInputs` 同时清除继承的 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`，只保留 `apiKeyHelper` 回调，避免出现「两者并用导致认证优先级混乱」的警告。
+> **v0.11 变更（按真实使用反馈收敛供应商模型与导入冲突语义）**：① Target CLI 名称改为与原生 CLI 一致的 `claude`（原先的 `claude-code` 废弃），下文所有 CLI 标识、渲染目录、`secret get` 等示例均已同步。② **供应商身份由 `(target, id)` 共同决定**：`Provider` 不再持有 `targets` 数组（多 CLI 共用一条记录），改为持有单个 `target`；因此 `providers` 主键从 `(id)` 改为 `(target, id)`，并新增 `UNIQUE(target, display_name)`——**不同 CLI 可同名供应商，同一 CLI 内显示名称唯一**，导入时也不再需要为供应商名追加 CLI 后缀。③ **导入冲突直接覆盖，不再生成 `slugify(display_name-target)` + 数字后缀**：以 `(target, id)` 为匹配键，`source = "manual"` 的记录同样参与覆盖（与 cc-switch 的覆盖行为一致），`conflict_renamed` 信号废弃，用户可放心清库重导，本版不做迁移与向下兼容。④ Claude Code 认证冲突警告：`ApplyGlobal` 合并全局 settings 时删除 `env.ANTHROPIC_AUTH_TOKEN`/`env.ANTHROPIC_API_KEY`，渲染产物与 `BuildLaunchInputs` 同时清除继承的两项环境变量，只保留 `apiKeyHelper` 回调，避免出现「两者并用导致认证优先级混乱」的警告。
 
 > **v0.9 变更（Codex 模型目录实测修正）**：
 
@@ -238,7 +238,7 @@ interface LaunchAdapter {
 
 ### 5.1 ClaudeCodeAdapter
 
-Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不是把明文塞进 `env` 块**：`apiKeyHelper` 设置指向一个脚本，Claude Code 需要密钥时调用它、取 stdout 作为凭据。**关键约束（官方认证优先级决定，必须遵守）**：Claude Code 的凭据优先级从高到低是「云厂商 > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper` > ...」——因此若环境中同时存在 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 与 `apiKeyHelper`，Claude Code 会提示「Both ANTHROPIC_AUTH_TOKEN and apiKeyHelper set · auth may not work as expected」。Relay 的处理是**物理清除继承的这两个环境变量**（渲染 JSON 的 `env` 块与 `BuildLaunchInputs` 的 `UnsetEnv` 都不再包含它们，回调模式下 `render-env` 输出为空），只保留 `apiKeyHelper` 单一路径。所以：
+Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不是把明文塞进 `env` 块**：`apiKeyHelper` 设置指向一个脚本，Claude Code 需要密钥时调用它、取 stdout 作为凭据。**关键约束（官方认证优先级决定，必须遵守）**：Claude Code 的凭据优先级从高到低是「云厂商 > `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY` > `apiKeyHelper` > ...」——因此若环境中同时存在 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` 与 `apiKeyHelper`，Claude Code 会提示「Both ANTHROPIC_AUTH_TOKEN and apiKeyHelper set · auth may not work as expected」。Relay 的处理是**物理清除继承的这两个环境变量**（`ApplyGlobal` 合并全局 settings 时删除 `env` 中的同名键，渲染 JSON 的 `env` 块与 `BuildLaunchInputs` 的 `UnsetEnv` 都不再包含它们，回调模式下 `render-env` 输出为空），只保留 `apiKeyHelper` 单一路径。所以：
 
 - `render()` 产出的 settings JSON 默认形如：
   ```json
@@ -253,7 +253,7 @@ Claude Code 同样有等价的动态取密钥机制，**默认改用它，而不
 - `relay secret get claude <id>` 与 Codex 共用同一个子命令实现（见 §5.2），只解密打印 stdout，不做网络调用，保证响应够快（Claude Code 对慢于 10 秒的 helper 会显示警告，连续失败会报 `apiKeyHelper script is failing`）。
 - 刷新间隔默认 5 分钟（`CLAUDE_CODE_API_KEY_HELPER_TTL_MS` 可调），与 Codex 的 `refresh_interval_ms` 默认值（300000ms）刚好对称，两个 Adapter 的密钥回调设计可以共享同一套心智模型。
 - `env_inline`（明文写入渲染产物）已禁用，与 AGENTS.md 冲突；`env_key`（进程环境注入）仍作为可选降级路径保留，密钥不落任何配置文件。
-- `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`（保留其余用户已有 key，只覆盖 Relay 管理的字段，用注释/标记块界定 Relay 管理范围，避免覆盖用户手工添加的其他配置）。
+- `applyGlobal()`：按 Claude Code 的 settings 合并优先级，把内容写入 `~/.claude/settings.json`；切换时清除上次 Relay 管理的字段以及 `env.ANTHROPIC_AUTH_TOKEN`/`env.ANTHROPIC_API_KEY` 冲突项，保留其余用户已有 key。
 - `buildLaunchInputs()`：`argv = ["--settings", <rendered_file_path>]`，`env = {}`（默认路径下密钥走 `apiKeyHelper` 回调，不需要 Relay 额外注入进程环境）。
 - `resumeArgs(id)`：`["--resume", id]`。
 
