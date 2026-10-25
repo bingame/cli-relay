@@ -1,4 +1,5 @@
-// Package plugins 预留可选通知与外部编排扩展，不在核心执行流程自动重试或关机。
+// Package plugins 提供可选通知适配器（relay notify 子命令组使用），并预留外部编排
+// 扩展；不在核心执行流程自动重试或关机。
 package plugins
 
 import "context"

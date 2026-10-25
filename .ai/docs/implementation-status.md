@@ -68,12 +68,13 @@ GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平
 | P1 | SQL 内存导入与快照加密、按 `(target,id)` 直接覆盖、dry-run；受监管执行、退出分类、会话记录、子进程树收尾 |
 | P2 | relay-handoff Skill、Markdown/YAML/JSON Schema 验证、活 agent 输出接收、continue 与硬约束重复强调 |
 | P3 | Codex 官方 thread/read 优先、无头 resume、容错 JSONL、可选总结供应商、来源凭据脱敏、降级标识 |
-| P4 | 仅独立接口预留；不含重试循环、通知发送或关机 |
+| P4 | 通知子命令组 `relay notify`（2026-10-26）：webhook/Bark/Telegram/ntfy 适配器、通道令牌封存密钥库、三家 CLI 用户级 hook 安装/卸载（Codex 链式接管）、事件去重与静默 hook 入口；重试循环与关机仍仅接口预留 |
 | P5 | render-args / render-env JSON 对接；二进制别名包装；Codex 的 Multica 风格双向 stdio 完整本地验证 |
 
 ## 已运行检查
 
 - Windows：`go test ./...`、`go vet ./...`。
+- relay notify（2026-10-26，Windows）：`go test ./...` 全绿（适配器 httptest 断言请求形态、三家 install/uninstall 与伪造"orca 式"已有 hooks 共存/幂等/精确移除、Codex 链式接管与还原、通道加密往返与错误密钥拒绝、去重窗口、CLI 端到端含密钥库锁定时 hook 静默）；真实二进制隔离目录冒烟：set/install/status/hook（无输出、退出 0、失败仅记 notify.log）/uninstall 后三个原生配置文件恢复原状，通道文件无令牌明文。
 - 真实 SQL 完整 CLI 验证：18 条供应商、15 条支持的 target 渲染，61 条加密秘密数据、1 份加密 MCP/prompts 快照；dry-run 无写入，导入不自动 switch，输出及落盘文件未发现已识别凭据明文。
 - 2026-09-20 用用户 2026-09-19 生成的新导出（14 条供应商、18 列）复验：`TestParseRealDumpStatistics`、`TestRealDumpAdapterIntegration`（期望值改为从 dump 现场推导，不再硬编码上次的 15）；CLI 端到端（隔离 RELAY_HOME）覆盖 dry-run 报告 schema、按 `(target,id)` 直接覆盖（含 manual 记录）、`--on-conflict skip`、空导出 `--prune` 后 disabled 记录 `switch` 报"已被 cc-switch 同步标记为失效"、manual 记录不受清理影响；数据目录扫描未发现明文凭据。
 - 适配器真实 Codex + 127.0.0.1 假 SSE：override、独立 profile、switch 后默认配置三种路径。

@@ -1,8 +1,8 @@
 # Relay
 
-Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供应商，提供单次执行监管和跨 CLI 的 Markdown 会话交接。没有常驻服务，不包含任务队列或自动重试循环。
+Relay 是 Go 编写的本地命令行工具，为 Claude Code、Codex 选择供应商，提供单次执行监管、跨 CLI 的 Markdown 会话交接，以及基于各 CLI 用户级 hooks 的远程通知（`relay notify`）。没有常驻服务，不包含任务队列或自动重试循环。
 
-已实现规范 P0–P3 与 P5 的接入能力。P4 的通知、重试、关机仅预留接口，不自动执行这些操作。原生 Claude Code / Codex 仍需单独安装。
+已实现规范 P0–P3 与 P5 的接入能力，P4 的通知子命令组已交付；重试、关机仍仅预留接口。原生 Claude Code / Codex 仍需单独安装。
 
 ## 安装
 
@@ -126,6 +126,9 @@ unset RELAY_INPUT_KEY
 | `exec <cli> [--provider <id>] -- ...` | 单次无头运行、实时转发输出、记录会话、返回分类退出码 |
 | `status` | 输出 current 和仍存活的管理实例；不是完整系统进程枚举 |
 | `skill install [--cli claude,codex]` | 从二进制离线安装 Handoff Skill，默认只安装本机可探测到的 CLI |
+| `notify set/clear` | 配置或清除远程通知通道（webhook/Bark/Telegram/ntfy）；令牌只走 stdin 并加密存储 |
+| `notify install/uninstall [--claude --codex --zcode]` | 向各 CLI **用户级**配置写入/移除通知 hook，任务完成与需要人工介入时推送 |
+| `notify status/test` | 查看通道与各 CLI 安装状态；发送测试通知 |
 | `--version` | 显示发布版本 |
 | `handoff schema [--validate <doc>]` | 输出 JSON Schema，或校验 Markdown 文档 |
 | `handoff export --cli <cli> --live` | 输出应交给活 agent 的请求；不会假装读取活 agent 的内存 |
@@ -156,6 +159,39 @@ Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME
 多 target switch 逐个应用并逐个记录成功项，不提供跨原生配置文件的全有或全无事务。切换失败后可用 `status` 查看已完成项。
 
 详细探测依据：[Codex NOTES](internal/adapter/codex/NOTES.md)、[Claude NOTES](internal/adapter/claudecode/NOTES.md)、[导入器 NOTES](internal/importer/ccswitch/NOTES.md)。
+
+## 远程通知（relay notify）
+
+在多台机器同时开 CLI 会话时，通过各 CLI **自身的用户级配置**接收"任务完成 / 需要人工介入"推送——不要求通过 `relay run` 启动，直接启动的 `claude` / `codex` / ZCode 会话同样生效。可选通道：**通用 webhook**（可接企业微信/钉钉/飞书群机器人或自建服务）、**Bark**、**Telegram Bot**、**ntfy**。
+
+```sh
+# 1. 配置通道（令牌从 stdin 读，只进加密存储，不进 argv）
+printf '%s' "$BARK_KEY" | relay notify set --type bark --token-stdin
+relay notify test            # 验证推送链路
+
+# 2. 写入各 CLI 用户级配置（默认三家全装；可 --claude/--codex/--zcode 选择）
+relay notify install
+relay notify status          # 查看安装状态与最近错误日志
+relay notify uninstall       # 只移除 relay 自己的条目并还原原状
+```
+
+各家写入的最小条目（全部用户级，无需会话内审批）：
+
+| CLI | 写入位置 | 条目 |
+| --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` | `Stop`、`Notification`、`PreToolUse`（matcher `AskUserQuestion\|ExitPlanMode`）各 1 条 |
+| Codex | `~/.codex/config.toml` | 顶层 `notify` 1 条（`agent-turn-complete` / `approval-requested`） |
+| ZCode | `~/.zcode/cli/config.json` | `hooks.enabled=true` + `Stop`、`PermissionRequest`、`PreToolUse`（matcher 同上） |
+
+行为要点：
+
+- **最小足迹与共存**：只追加 relay 自己的条目，`uninstall` 精确移除；与已有 hooks（如外部编排工具写入的条目）互不影响。`switch` 与通知 hooks 互不干扰。
+- **Codex 链式接管**：Codex 只支持一个 `notify` 程序。若该键已被占用（如 Codex 桌面端），install 会接管并记录旧值，hook 每次触发先推送、再把载荷原样转发给旧程序；卸载自动还原，用户手改过的值不会被覆盖。
+- **绝不拖累宿主 CLI**：hook 命令无输出、恒以 0 退出，整体预算 ≤10 秒（HTTP 5 秒）；失败只追加到 `~/.relay/notify.log`（`status` 可查看）。
+- **防噪**：10 秒窗口内同 session 同类事件去重；Stop 续跑（`stop_hook_active`）不重复通知。
+- **密钥约束**：通道令牌封存在 Relay 密钥库（`~/.relay`）。passphrase 后端（无系统密钥库的机器）需要 hook 进程能拿到 `RELAY_PASSPHRASE`（例如在启动 CLI 的 shell 里 export）；拿不到时 hook 静默跳过并记日志，不影响会话。
+
+消息包含事件类型、主机名、项目目录、CLI 名与 session 前缀，多实例多机器可分辨。事件依据与上游差异见 [notifyhook NOTES](internal/notifyhook/NOTES.md)。
 
 ## Handoff
 

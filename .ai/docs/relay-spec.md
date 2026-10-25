@@ -1,4 +1,6 @@
-# Relay 技术规格说明书 v0.11
+# Relay 技术规格说明书 v0.12
+
+> **v0.12 变更（交付 §11 通知子命令组 `relay notify`）**：① §11 的通知模块落地为 `relay notify` 子命令组（`set/clear/install/uninstall/status/test` 与内部 `hook` 入口），事件源改为**各 CLI 自身的用户级 hook 配置**（Claude Code `settings.json` 的 `Stop`/`Notification`/`PreToolUse(AskUserQuestion|ExitPlanMode)`、Codex `config.toml` 顶层 `notify`、ZCode `config.json` 的 `Stop`/`PermissionRequest`/`PreToolUse`），不再要求通过 `relay run/exec` 启动 CLI；通道适配器在原 Bark/Telegram/webhook 之外新增 ntfy。② 通道令牌按 §10 密钥约束封存进 Relay 密钥库，hook 进程恒以 0 退出、失败只写 `~/.relay/notify.log`。③ Codex 只支持一个 `notify` 程序，被占用时采取**链式接管**：relay 推送后把载荷原样转发给旧程序，卸载还原。④ §11 剩余的重试与关机仍为接口预留。上游依据与差异见 `internal/notifyhook/NOTES.md`。
 
 > **v0.11 变更（按真实使用反馈收敛供应商模型与导入冲突语义）**：① Target CLI 名称改为与原生 CLI 一致的 `claude`（原先的 `claude-code` 废弃），下文所有 CLI 标识、渲染目录、`secret get` 等示例均已同步。② **供应商身份由 `(target, id)` 共同决定**：`Provider` 不再持有 `targets` 数组（多 CLI 共用一条记录），改为持有单个 `target`；因此 `providers` 主键从 `(id)` 改为 `(target, id)`，并新增 `UNIQUE(target, display_name)`——**不同 CLI 可同名供应商，同一 CLI 内显示名称唯一**，导入时也不再需要为供应商名追加 CLI 后缀。③ **导入冲突直接覆盖，不再生成 `slugify(display_name-target)` + 数字后缀**：以 `(target, id)` 为匹配键，`source = "manual"` 的记录同样参与覆盖（与 cc-switch 的覆盖行为一致），`conflict_renamed` 信号废弃，用户可放心清库重导，本版不做迁移与向下兼容。④ Claude Code 认证冲突警告：`ApplyGlobal` 合并全局 settings 时删除 `env.ANTHROPIC_AUTH_TOKEN`/`env.ANTHROPIC_API_KEY`，渲染产物与 `BuildLaunchInputs` 同时清除继承的两项环境变量，只保留 `apiKeyHelper` 回调，避免出现「两者并用导致认证优先级混乱」的警告。
 
@@ -24,7 +26,7 @@
 3. 长会话（尤其夹带大量图片）异常中断后，重试会重发整个巨大请求体，容易再次失败；需要能压缩/整理成 Markdown 供新会话续接。
 4. 需要在全局默认配置之外，为单个新启动的 CLI 实例临时指定另一个供应商，多实例互不干扰。
 5. 无人值守自动重试推进（可选能力，见 §11，参考 mulita-cli.md / Multica 架构）。
-6. 自定义通知：toast / webhook（Bark）/ Telegram（可选能力，见 §11）。
+6. 自定义通知：远程推送 webhook / Bark / Telegram / ntfy（已实现，见 §11；本机 toast 由用户自带工具承担）。
 7. 任务完成后关机（可选能力，见 §11）。
 
 在讨论过程中确认：**问题 3 的机制基本等价于问题 2 的解法**（统一 Markdown schema + 三级 fallback），因此本 spec 把 2、3 合并成一个子系统（§9 Handoff）。
@@ -545,12 +547,12 @@ multica agent create --name my-agent --runtime-id codex \
 
 ---
 
-## 11. 可选插件模块（不在 MVP 范围，接口预留即可）
-- **无人值守重试**：复用 §7.2 `exec` 已经吐出的分类结果（可重试/需人工/冷启动重试）驱动一个简单的本地循环（无需数据库事务，单机场景用文件锁 + 状态文件足够），仅在用户未接入 Multica 时启用。
-- **通知**：定义 `NotificationEvent { type: task_completed|task_failed|needs_human|retry_exhausted, payload }`，适配器模式接 Bark（简单 HTTP GET/POST）、Telegram Bot API、任意 webhook。
-- **完成后关机**：读取上面无人值守循环的「队列清空」信号触发，默认要求二次确认或可配置的倒计时窗口，倒计时期间通过通知模块提醒。
+## 11. 可选插件模块
+- **通知（已实现，`relay notify` 子命令组）**：事件模型沿用 `NotificationEvent { type: task_completed|task_failed|needs_human|retry_exhausted, payload }`（`internal/plugins`），当前映射 `task_completed` 与 `needs_human` 两类；`task_failed`/`retry_exhausted` 留给重试循环。适配器：通用 webhook（POST JSON，可选 Bearer）、Bark（JSON POST 到 `<server>/push`，title/body 分字段）、Telegram Bot API、ntfy。事件源是各 CLI **自身的用户级 hook 配置**（不要求 `relay run` 启动）：`notify install` 写入 Claude Code `Stop`/`Notification`/`PreToolUse(AskUserQuestion|ExitPlanMode)`、Codex 顶层 `notify`（被占用则链式接管：relay 推送后把载荷原样转发旧程序，卸载还原）、ZCode `Stop`/`PermissionRequest`/`PreToolUse`；全部用户级、免会话内审批，`uninstall` 只删 relay 自己的条目。通道令牌封存进 Relay 密钥库（§10 约束，令牌只走 stdin）；内部 hook 命令无输出、恒以 0 退出，预算 ≤10s，失败只写 `~/.relay/notify.log`；10 秒窗口内同 session 同类事件去重。
+- **无人值守重试（仅接口预留）**：复用 §7.2 `exec` 已经吐出的分类结果（可重试/需人工/冷启动重试）驱动一个简单的本地循环（无需数据库事务，单机场景用文件锁 + 状态文件足够），仅在用户未接入 Multica 时启用。
+- **完成后关机（仅接口预留）**：读取上面无人值守循环的「队列清空」信号触发，默认要求二次确认或可配置的倒计时窗口，倒计时期间通过通知模块提醒。
 
-这三者应作为独立子命令组（如 `relay watch`）存在，允许用户完全不装它们、只用 Provider 层 + Handoff 层。
+这三者作为可选能力存在，允许用户完全不装它们、只用 Provider 层 + Handoff 层：通知在不执行 `notify install` 时完全休眠，后两者尚未实现。
 
 ---
 
