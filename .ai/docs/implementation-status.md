@@ -10,8 +10,8 @@
 - 设置 `RELAY_CODEX_INTEGRATION=1` 后执行 `go test ./internal/adapter/codex -run '^TestLocalCodex' -v -count=1`，退出 0：旧 `custom=false` 保存失败对照成立，新 callback/env_key 配置可保存并在重启后保留模型偏好，跨供应商 `thread/resume` 与 `exec resume` 成功。
 - `python -X utf8 scripts/verify_codex_relay.py --relay bin/relay.exe` 退出 0：`relay exec`、app-server callback/env_key 渲染与 wrapper 完成回合，鉴权、RPC 模型覆盖、推理等级、历史回读及主配置/profile 不变检查通过。
 - 上述测试仅使用虚构凭据、自动清理的隔离目录和 127.0.0.1 假服务，不修改真实 Claude Code/Codex/Multica 配置。临时测试目录由测试框架回收；`bin/relay.exe` 保留供本次验证复核且已由 Git 忽略，本地 `.zcode/` 会话计划不纳入发布。
-- 发布分支 `codex/release-v0.1.6` 的代码提交 `a1822da` 已通过 [三系统 CI、Linux race 与五平台打包验证](https://github.com/bingame/cli-relay/actions/runs/42794604176)，所有任务成功。远端 `master` 必须经 PR 且获得另一位审阅者批准，[PR #2](https://github.com/bingame/cli-relay/pull/2) 因此保留待审，不调整分支保护。
-- `v0.1.6` 标签从上述发布分支创建；本段发布记录是随后唯一的文档补充。标签工作流再次运行同一套验证，成功后生成 Release 和安装附件。实际发布结果以 [Release](https://github.com/bingame/cli-relay/releases/tag/v0.1.6) 及其 GitHub Actions 为准。
+- 发布分支 `codex/release-v0.1.6` 的代码提交 `a1822da` 已通过 [三系统 CI、Linux race 与五平台打包验证](https://github.com/bingame/cli-relay/actions/runs/42794604176)，所有任务成功。`v0.1.6` 标签指向只补充发布记录的 `56f5cbd`，标签工作流再次运行同一套验证后生成 Release 和安装附件。实际结果以 [Release](https://github.com/bingame/cli-relay/releases/tag/v0.1.6) 及其 GitHub Actions 为准。
+- 用户明确要求个人项目无需手动批准 PR，已将 `master` 的必需人工审批数设为 0，并启用仓库自动合并；新增必需的三系统测试和 `packages` 四项 GitHub Actions 检查，要求分支与主线同步。保留管理员约束、禁止强推/删除与会话解决要求。[PR #2](https://github.com/bingame/cli-relay/pull/2) 使用 CI 通过后自动合并的流程，后续发布沿用 `distribution/NOTES.md` 中的约定。
 
 ## 2026-10-09：修复 Claude 全局 settings 的认证冲突警告
 
