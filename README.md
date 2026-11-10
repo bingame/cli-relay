@@ -118,7 +118,7 @@ unset RELAY_INPUT_KEY
 | 命令 | 行为 |
 | --- | --- |
 | `provider add/list/remove` | 管理供应商；删除仍被 current 引用的供应商会报错 |
-| `provider import --from cc-switch <sql> [--dry-run]` | 内存执行受限 SQL dump、解析真实列、加密凭据和原始快照；按 `(target, id)` 直接覆盖本地记录（含手动配置），同名供应商只在同一 CLI 内唯一，不同 CLI 可同名；不生成数字后缀改名 |
+| `provider import --from cc-switch <sql> [--dry-run]` | 只导入模型供应商、模型映射及必要的加密凭据；自动清理旧 cc-switch 导入中的非供应商配置和原始快照。按 `(target, id)` 直接覆盖本地记录（含手动配置），同一 CLI 内显示名称唯一，不生成数字后缀改名 |
 | `provider render-args <cli> <id>` | 输出原生参数 JSON 数组，不包含密钥 |
 | `provider render-env <cli> <id> [--format dotenv\|json]` | 输出启动环境；默认 `KEY=VALUE`，Multica 使用 JSON |
 | `switch <id> [--target <cli>]` | 合并原生非敏感配置并修改指定 target 的 current 指针 |
@@ -135,6 +135,8 @@ unset RELAY_INPUT_KEY
 | `handoff export --cli <cli> --input <doc或-> [-o <path>]` | 校验并接收活 agent 实际生成的文档 |
 | `handoff export --cli <cli> --dead --session <id> [-o <path>]` | 官方结构化读取/恢复，失败后原始文件解析与模型总结 |
 | `handoff continue --doc <path> [--cli <cli>] [--provider <id>] [--exec]` | 新会话注入文档，单独再次强调硬约束 |
+
+cc-switch 导入按字段语义过滤：`projects`、hooks、MCP、Skills、插件、本地目录和非供应商环境变量均不保存，也不保留原始 settings/meta 或 MCP/prompts 快照。升级后重新执行一次 `provider import --from cc-switch <sql>`，会自动清理历史导入记录和相应渲染产物，无需 `--prune`；`--on-conflict skip`、disabled 和本次 SQL 未包含的旧导入记录也参与清理，但保留其供应商值、模型目录和必要凭据。`--dry-run` 的 `cleaned_providers`、`discarded_snapshots` 展示清理计划；不会改动本机原生 CLI 配置或未被本次覆盖的手动供应商。
 
 不指定 provider 时使用该 CLI 的 current；没有 current 时沿用原生 CLI 默认配置。所有接受供应商的参数（`--provider`、`switch`、`remove`、`render-args/render-env`、`secret get`）同时接受 **ID 或显示名称**；显示名称重名时报错并列出候选 ID。这些参数支持 shell 补全（`relay completion bash|zsh|fish|powershell` 生成脚本）。`--` 后参数由原生 CLI 消费。无头模式会补齐必要输出标志；冲突输出格式报错。Codex 的 `app-server` 保持双向协议并返回原生退出码，由 Multica 处理交互和重试。
 

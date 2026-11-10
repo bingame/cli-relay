@@ -38,12 +38,11 @@ type Entry struct {
 type Result struct {
 	Providers []Entry
 	FileHash  string
-	Snapshot  []byte // 含原始 MCP/prompt 数据，只能加密存储。
 	Columns   []string
 }
 
 // Parse 只解析，不渲染、不导入本地数据库、不切换当前供应商。
-// Secrets 与 Snapshot 都是敏感内存数据，调用方必须在持久化之前加密。
+// Secrets 是敏感内存数据，调用方必须在持久化之前加密。
 func Parse(ctx context.Context, path string) (*Result, error) {
 	data, err := safeio.ReadRegular(path, MaxDumpBytes)
 	if err != nil {
@@ -119,18 +118,6 @@ func Parse(ctx context.Context, path string) (*Result, error) {
 		}
 		result.Providers = append(result.Providers, entry)
 	}
-	snapshot := map[string]rawTable{}
-	for _, table := range []string{"mcp_servers", "prompts"} {
-		value, err := tableRows(ctx, conn, table, false)
-		if err != nil {
-			return nil, err
-		}
-		snapshot[table] = value
-	}
-	result.Snapshot, err = json.Marshal(snapshot)
-	if err != nil {
-		return nil, errors.New("无法编码 cc-switch 原始快照")
-	}
 	return result, nil
 }
 
@@ -185,7 +172,6 @@ type providerColumnMapping struct {
 	app      string
 	name     string
 	settings string
-	meta     string
 	current  string
 }
 
@@ -216,8 +202,6 @@ func resolveProviderColumns(schema tableSchema, userVersion int64) (providerColu
 		}
 		*field.dest = column
 	}
-	// meta 不是 Relay 建立 provider 所必需的语义字段；存在时仅作为加密源数据保存。
-	mapping.meta, _ = schema.findColumn("meta")
 	if len(missing) > 0 {
 		return providerColumnMapping{}, fmt.Errorf(
 			"providers 缺少必需语义字段：%s；user_version=%d；实际列：%s",
@@ -228,11 +212,7 @@ func resolveProviderColumns(schema tableSchema, userVersion int64) (providerColu
 }
 
 func (m providerColumnMapping) queryColumns() []string {
-	columns := []string{m.id, m.app, m.name, m.settings, m.current}
-	if m.meta != "" {
-		columns = append(columns, m.meta)
-	}
-	return columns
+	return []string{m.id, m.app, m.name, m.settings, m.current}
 }
 
 func (m providerColumnMapping) semanticRow(row map[string]any) map[string]any {
@@ -243,9 +223,6 @@ func (m providerColumnMapping) semanticRow(row map[string]any) map[string]any {
 		"settings_config": row[m.settings],
 		"is_current":      row[m.current],
 	}
-	if m.meta != "" {
-		semantic["meta"] = row[m.meta]
-	}
 	return semantic
 }
 
@@ -255,14 +232,6 @@ func databaseUserVersion(ctx context.Context, conn *sql.Conn) (int64, error) {
 		return 0, errors.New("无法读取 SQL 导出的 schema 版本")
 	}
 	return version, nil
-}
-
-func tableRows(ctx context.Context, conn *sql.Conn, table string, required bool) (rawTable, error) {
-	schema, err := inspectTable(ctx, conn, table, required)
-	if err != nil || len(schema.Columns) == 0 {
-		return rawTable{Columns: []string{}, Rows: []map[string]any{}}, err
-	}
-	return readTableRows(ctx, conn, schema.Name, schema.columnNames())
 }
 
 func inspectTable(ctx context.Context, conn *sql.Conn, table string, required bool) (tableSchema, error) {
@@ -370,10 +339,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 	}
 	entry := Entry{
 		Provider: provider.Provider{ID: provider.Slugify(name), Target: app, DisplayName: name, Source: "cc-switch-import", SecretMode: "callback", Status: "active", Extra: map[string]any{}},
-		Secrets:  map[string]string{"source_settings": raw}, Current: current, OriginalID: id,
-	}
-	if rawMeta, ok := textValue(row["meta"]); ok {
-		entry.Secrets["source_meta"] = rawMeta
+		Secrets:  map[string]string{}, Current: current, OriginalID: id,
 	}
 	switch app {
 	case "claude":
@@ -396,7 +362,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 				}
 			}
 		}
-		// 两种鉴权不能同时注入；保留原生 API_KEY 语义，次要凭据仅留在加密源配置中。
+		// 两种鉴权不能同时注入；保留原生 API_KEY 语义，只保存实际使用的主凭据。
 		if entry.Secrets["api_key"] != "" {
 			entry.Secrets["api_key_env"] = "ANTHROPIC_AUTH_TOKEN"
 			if firstString(env["ANTHROPIC_AUTH_TOKEN"]) == "" && firstString(env["ANTHROPIC_API_KEY"]) != "" {
@@ -429,7 +395,7 @@ func parseEntry(row map[string]any) (Entry, error) {
 		if entry.Secrets["api_key"] == "" {
 			entry.Secrets["api_key"] = firstString(selectedConfig["experimental_bearer_token"], selectedConfig["api_key"], env[firstString(selectedConfig["env_key"])])
 		}
-		// JSON env 中可能另有凭据；原始 auth/config 只通过 source_settings 加密保存。
+		// 先识别凭据副本；最后只保留供应商实际使用的凭据，不保存原始 auth/config。
 		if env != nil {
 			sanitize(map[string]any{"env": env}, "", entry.Secrets)
 		}
@@ -440,7 +406,9 @@ func parseEntry(row map[string]any) (Entry, error) {
 		// 由 Adapter 决定"不渲染目录"，把模型列表交回目标 CLI（见 codexCatalogModels）。
 		entry.Models = append(entry.Models, codexCatalogModels(settings["modelCatalog"], entry.Provider.Model)...)
 	default:
-		// 不支持的 target 保留全量加密源数据，不生成可误用的原生配置。
+		// 不支持的 target 只保留通用供应商字段，不保存任意原始配置。
+		entry.Provider.BaseURL = firstString(settings["base_url"])
+		entry.Provider.Model = firstString(settings["model"])
 		entry.Secrets["api_key"] = firstString(settings["api_key"])
 		sanitize(settings, "", entry.Secrets)
 	}
@@ -450,25 +418,40 @@ func parseEntry(row map[string]any) (Entry, error) {
 	if err := removeCredentialCopies(&entry); err != nil {
 		return Entry{}, err
 	}
+	for key := range entry.Secrets {
+		if !KeepSecret(entry.Provider, key) {
+			delete(entry.Secrets, key)
+		}
+	}
 	if err := entry.Provider.Validate(); err != nil {
 		return Entry{}, errors.New("供应商 ID、目标或 base_url 无效；URL 不能含凭据或查询参数")
 	}
 	return entry, nil
 }
 
-// spec §6 导入白名单：只入库用户级语义字段。Claude Code 的
-// permissions/hooks/statusLine 等运行环境配置属于 Relay 全局配置，不随
-// provider 走；被剔除的内容仍完整保留在加密的 source_settings 快照中。
-var claudeSettingsKeys = map[string]bool{"env": true}
+// spec §6：env 也按供应商语义过滤，不能携带 PATH、配置目录、MCP/Skills 路径等。
+var claudeEnvKeys = map[string]bool{
+	"ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_API_KEY": true,
+	"ANTHROPIC_BASE_URL": true, "ANTHROPIC_CUSTOM_HEADERS": true,
+	"ANTHROPIC_MODEL": true, "ANTHROPIC_SMALL_FAST_MODEL": true,
+	"ANTHROPIC_DEFAULT_HAIKU_MODEL": true, "ANTHROPIC_DEFAULT_SONNET_MODEL": true,
+	"ANTHROPIC_DEFAULT_OPUS_MODEL": true, "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION": true,
+	"CLAUDE_CODE_USE_BEDROCK": true, "CLAUDE_CODE_USE_VERTEX": true, "CLAUDE_CODE_USE_FOUNDRY": true,
+	"API_TIMEOUT_MS": true, "CLAUDE_CODE_MAX_OUTPUT_TOKENS": true, "MAX_THINKING_TOKENS": true,
+}
 
 func claudeSettingsWhitelist(settings map[string]any) map[string]any {
-	out := map[string]any{}
-	for key, value := range settings {
-		if claudeSettingsKeys[key] {
-			out[key] = value
+	env := map[string]any{}
+	source, _ := settings["env"].(map[string]any)
+	for key, value := range source {
+		if claudeEnvKeys[key] {
+			// 原生 env 的值是字符串；不透传嵌套的任意配置。
+			if text, ok := value.(string); ok {
+				env[key] = text
+			}
 		}
 	}
-	return out
+	return map[string]any{"env": env}
 }
 
 // 与 codex Adapter 消费的白名单保持一致（adapter/codex 的
@@ -500,6 +483,9 @@ func codexConfigWhitelist(config map[string]any) map[string]any {
 			}
 			clean := map[string]any{}
 			for name, raw := range defs {
+				if name != firstString(config["model_provider"]) {
+					continue
+				}
 				def, ok := raw.(map[string]any)
 				if !ok {
 					continue
@@ -851,6 +837,11 @@ func sensitiveName(name string) bool {
 
 func tokenBudget(key string, value any) bool {
 	switch key {
+	case "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "MAX_THINKING_TOKENS":
+		if text, ok := value.(string); ok {
+			number, err := strconv.ParseInt(text, 10, 64)
+			return err == nil && number >= 0
+		}
 	case "model_auto_compact_token_limit", "max_tokens", "max_output_tokens", "max_input_tokens":
 		switch value.(type) {
 		case int64, float64, int:

@@ -190,6 +190,10 @@ func (a *App) importCommand() *cobra.Command {
 		}
 		var store *provider.Store
 		existing := map[string]provider.Provider{}
+		var existingItems []provider.Provider
+		var cleanups []provider.ImportCleanup
+		cleaned := []string{}
+		discardedSnapshots := 0
 		if !dry {
 			unlock, e := a.lock(cmd.Context())
 			if e != nil {
@@ -213,11 +217,23 @@ func (a *App) importCommand() *cobra.Command {
 			if e != nil {
 				return e
 			}
+			existingItems = items
 			for _, p := range items {
 				existing[providerKey(p.Target, p.ID)] = p
 				if p.DisplayName != "" && p.DisplayName != p.ID {
 					existing[providerKey(p.Target, p.DisplayName)] = p
 				}
+			}
+			cleanups, e = ccswitch.PlanCleanup(cmd.Context(), store)
+			if e != nil {
+				return e
+			}
+			for _, plan := range cleanups {
+				cleaned = append(cleaned, plan.Provider.Target+"/"+plan.Provider.ID)
+			}
+			discardedSnapshots, e = store.ImportSnapshotCount(cmd.Context())
+			if e != nil {
+				return e
 			}
 		}
 		entries := make([]provider.Entry, 0, len(result.Providers))
@@ -276,7 +292,7 @@ func (a *App) importCommand() *cobra.Command {
 			batchNames[key] = p.DisplayName
 		}
 		stale := []string{}
-		for _, old := range existing {
+		for _, old := range existingItems {
 			if old.Source != "cc-switch-import" {
 				continue
 			}
@@ -286,6 +302,23 @@ func (a *App) importCommand() *cobra.Command {
 		}
 		sort.Strings(stale)
 		if !dry {
+			// 同 ID 的旧产物由新导入覆盖；同名不同 ID 时也清理旧 ID 的渲染缓存。
+			for _, plan := range cleanups {
+				replaced := false
+				for _, entry := range entries {
+					if entry.Provider.Target == plan.Provider.Target && entry.Provider.ID == plan.Provider.ID {
+						replaced = true
+						break
+					}
+				}
+				if !replaced {
+					if ad, ok := a.Adapters[plan.Provider.Target]; ok {
+						if _, e = ad.Render(plan.Provider, a.Home, plan.Models...); e != nil {
+							return fmt.Errorf("重新渲染供应商 %s 失败: %w", plan.Provider.ID, e)
+						}
+					}
+				}
+			}
 			for _, entry := range entries {
 				if ad, ok := a.Adapters[entry.Provider.Target]; ok {
 					if _, e = ad.Render(entry.Provider, a.Home, entry.Models...); e != nil {
@@ -293,12 +326,15 @@ func (a *App) importCommand() *cobra.Command {
 					}
 				}
 			}
+			if e = store.CleanImports(cmd.Context(), cleanups); e != nil {
+				return e
+			}
 			for _, entry := range entries {
 				if e = store.Upsert(cmd.Context(), entry); e != nil {
 					return e
 				}
 			}
-			if e = store.RecordImport(cmd.Context(), result.FileHash, result.Snapshot, allSeen(seenByTarget)); e != nil {
+			if e = store.RecordImport(cmd.Context(), result.FileHash, allSeen(seenByTarget)); e != nil {
 				return e
 			}
 			if prune {
@@ -309,11 +345,12 @@ func (a *App) importCommand() *cobra.Command {
 				}
 			}
 		}
-		return outputJSON(cmd, map[string]any{"dry_run": dry, "count": len(report), "providers": report, "stale_providers": stale})
+		return outputJSON(cmd, map[string]any{"dry_run": dry, "count": len(report), "providers": report, "stale_providers": stale,
+			"cleaned_providers": cleaned, "discarded_snapshots": discardedSnapshots})
 	}}
 	cmd.Flags().StringVar(&source, "from", "", "导入来源")
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "仅解析和报告，不写入本地存储")
-	cmd.Flags().StringVar(&onConflict, "on-conflict", "overwrite", "同名供应商处理：overwrite 或 skip")
+	cmd.Flags().StringVar(&onConflict, "on-conflict", "overwrite", "同名供应商处理：overwrite 或 skip（仍清理历史导入的非供应商数据）")
 	cmd.Flags().BoolVar(&prune, "prune", false, "将导出中已不存在的 cc-switch 供应商标记为 disabled")
 	_ = cmd.MarkFlagRequired("from")
 	return cmd
