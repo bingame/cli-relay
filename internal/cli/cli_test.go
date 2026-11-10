@@ -134,9 +134,10 @@ func TestProviderAddRenderSwitchAndIsolation(t *testing.T) {
 		t.Fatal("argv泄漏密钥")
 	}
 	before, _ := os.ReadFile(filepath.Join(native, "config.toml"))
-	if !bytes.Contains(before, []byte(original)) || !bytes.Contains(before, []byte("[model_providers.one]")) {
-		t.Fatal("临时启动应只注册 provider 并保留原配置")
+	if !bytes.Equal(before, []byte(original)) {
+		t.Fatal("临时启动应保留主配置不变")
 	}
+
 	env, e := command(t, root, "", "provider", "render-env", "codex", "one", "--format", "json")
 	if e != nil {
 		t.Fatal(e)
@@ -148,8 +149,12 @@ func TestProviderAddRenderSwitchAndIsolation(t *testing.T) {
 	if json.Unmarshal([]byte(env), &payload) != nil {
 		t.Fatal("Multica env必须JSON")
 	}
-	if len(payload.Env) != 0 {
-		t.Fatal("callback 模式的 render-env.env 应为空")
+	if len(payload.Env) != 2 || payload.Env["CODEX_HOME"] == "" || payload.Env["CODEX_SQLITE_HOME"] != native {
+		t.Fatal("callback 应仅输出隔离/共享目录")
+	}
+	profile, e := os.ReadFile(filepath.Join(payload.Env["CODEX_HOME"], "config.toml"))
+	if e != nil || bytes.Contains(profile, []byte("custom = false")) || !bytes.Contains(profile, []byte("[model_providers.custom]")) {
+		t.Fatal("临时启动未生成有效配置")
 	}
 	if _, e = command(t, root, "", "switch", "one", "--target", "codex"); e != nil {
 		t.Fatal(e)
@@ -168,6 +173,49 @@ func TestProviderAddRenderSwitchAndIsolation(t *testing.T) {
 	}
 	if _, e = command(t, root, "", "provider", "remove", "one"); e == nil {
 		t.Fatal("删除了激活供应商")
+	}
+}
+
+func TestRenderAppServerArgs(t *testing.T) {
+	t.Setenv("RELAY_PASSPHRASE", "test-passphrase-long-enough")
+	root, native := t.TempDir(), t.TempDir()
+	t.Setenv("CODEX_HOME", native)
+	if _, err := command(t, root, "dummy-app-server-key", "provider", "add", "--id", "probe", "--target", "codex", "--base-url", "https://example.test/v1", "--model", "probe-model", "--api-key-stdin"); err != nil {
+		t.Fatal(err)
+	}
+	output, err := command(t, root, "", "provider", "render-args", "codex", "probe", "--runtime", "app-server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var args []string
+	if err := json.Unmarshal([]byte(output), &args); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output, "--profile") || strings.Contains(output, "dummy-app-server-key") || !strings.Contains(output, "model_providers.relay_probe=") {
+		t.Fatal("未输出可直接用于 app-server 的无密钥配置", output)
+	}
+	app := &App{Home: root}
+	cmd := NewRootWithApp(app)
+	cmd.SetContext(context.Background())
+	options, err := app.prepare(cmd, "codex", "probe", adapter.Headless, []string{"app-server", "--listen", "stdio://"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.ProtocolBridge || strings.Contains(strings.Join(options.Inputs.Args, " "), "--profile") {
+		t.Fatal("包装模式没有选择 app-server 配置")
+	}
+	files, err := os.ReadDir(native)
+	if err != nil || len(files) != 0 {
+		t.Fatal("app-server 渲染或包装模式写入了原生配置", files, err)
+	}
+	for _, target := range []string{"codex", "claude"} {
+		runtime := "invalid"
+		if target == "claude" {
+			runtime = "app-server"
+		}
+		if _, err := command(t, root, "", "provider", "render-args", target, "probe", "--runtime", runtime); err == nil {
+			t.Fatal("应拒绝无效或不支持的 runtime", target, runtime)
+		}
 	}
 }
 func TestImportDryRunAndDefaultOverwrite(t *testing.T) {

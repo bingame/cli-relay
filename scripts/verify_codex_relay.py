@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import urlsplit
 
 
 FAKE_KEY = 'relay-cli-local-fake-key'
@@ -64,14 +65,15 @@ def stop_tree(process):
         process.kill()
 
 
-def run(argv, cwd, env, timeout, input_text=''):
+def run(argv, cwd, env, timeout, input_text='', sensitive_output=False):
     child = start_process(argv, cwd, env)
     try:
         stdout, stderr = child.communicate(input_text, timeout=timeout)
     except BaseException:
         stop_tree(child)
         raise
-    check(FAKE_KEY not in stdout + stderr, 'CLI 输出泄露了测试凭据')
+    check(FAKE_KEY not in stderr and (sensitive_output or FAKE_KEY not in stdout),
+          'CLI 输出泄露了测试凭据')
     check(child.returncode == 0,
           f'CLI 退出码 {child.returncode}: {safe_error(stderr)}\nstdout: {safe_error(stdout)}')
     return stdout
@@ -80,12 +82,14 @@ def run(argv, cwd, env, timeout, input_text=''):
 class LocalModel(http.server.BaseHTTPRequestHandler):
     observations = []
     observations_lock = threading.Lock()
+    expected_model = MODEL
+    expected_effort = None
 
     def log_message(self, *_args):
         pass
 
     def do_POST(self):
-        if not self.path.startswith('/v1/responses'):
+        if urlsplit(self.path).path != '/v1/responses':
             self.send_error(404)
             return
         length = int(self.headers.get('Content-Length', '0'))
@@ -96,7 +100,9 @@ class LocalModel(http.server.BaseHTTPRequestHandler):
         with self.observations_lock:
             self.observations.append({
                 'auth': self.headers.get('Authorization') == 'Bearer ' + FAKE_KEY,
-                'model': request.get('model') == MODEL,
+                'model': request.get('model') == self.expected_model,
+                'effort': self.expected_effort is None or
+                request.get('reasoning', {}).get('effort') == self.expected_effort,
             })
             number = len(self.observations)
         item = {'id': f'msg_relay_probe_{number}', 'type': 'message',
@@ -231,6 +237,9 @@ def main():
                         ('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP')})
             env.update(RELAY_HOME=str(relay_home), CODEX_HOME=str(codex_home),
                        RELAY_PASSPHRASE=FAKE_PASSPHRASE, NO_COLOR='1')
+            env['PATH'] = str(relay.parent) + os.pathsep + env.get('PATH', '')
+            proxy = f'http://127.0.0.1:{server.server_port}'
+            env.update(HTTP_PROXY=proxy, HTTPS_PROXY=proxy, ALL_PROXY=proxy)
             if args.codex:
                 env['RELAY_CODEX_BIN'] = str(args.codex.resolve())
             (codex_home / 'config.toml').write_text(
@@ -257,35 +266,82 @@ def main():
             wrapper = root / ('relay-codex.exe' if os.name == 'nt' else 'relay-codex')
             shutil.copy2(relay, wrapper)
             env['RELAY_PROVIDER'] = 'probe'
-            before = len(LocalModel.observations)
-            rpc = RPC([wrapper, 'app-server', '--listen', 'stdio://'], cwd, env, args.timeout)
-            cleanup.callback(stop_tree, rpc.process)
-            rpc.request('initialize', {'clientInfo': {'name': 'relay-integration',
-                        'title': 'Relay 集成测试', 'version': '0.1.0'},
-                        'capabilities': {'experimentalApi': True}})
-            rpc.send('initialized', {})
-            thread = rpc.request('thread/start', {'cwd': str(cwd),
-                                 'approvalPolicy': 'never', 'sandbox': 'read-only',
-                                 'experimentalRawEvents': False, 'persistExtendedHistory': True})
-            thread_id = thread['thread']['id']
-            rpc.request('turn/start', {'threadId': thread_id, 'input': [
-                {'type': 'text', 'text': 'Reply ' + ANSWER + ' without tools.'}]})
-            completed = rpc.wait(lambda frame: frame.get('method') == 'turn/completed'
-                                 and frame.get('params', {}).get('threadId') == thread_id)
-            check(completed['params']['turn']['status'] == 'completed', 'wrapper 模型回合失败')
-            history = rpc.request('thread/read', {'threadId': thread_id, 'includeTurns': True})
-            items = [item for turn in history['thread']['turns'] for item in turn['items']]
-            check(any(item.get('type') == 'agentMessage' and ANSWER in item.get('text', '')
-                      for item in items), 'thread/read 没有返回刚生成的助手回复')
-            code = rpc.close()
-            verify_metadata(relay_home, thread_id, cwd)
-            check(len(LocalModel.observations) > before
-                  and all(all(row.values()) for row in LocalModel.observations[before:]),
-                  'wrapper 未向本地服务传递正确鉴权或模型')
-            print(json.dumps({'步骤': 'Multica 风格 wrapper', '退出码': code,
-                              'JSON-RPC': rpc.calls, '正确鉴权': True, '及时转发': True,
-                              'thread/read': True, '会话元数据': True}, ensure_ascii=False))
-            rpc = None
+            native = str(args.codex.resolve()) if args.codex else shutil.which('codex')
+            check(native, '未找到原生 Codex；可用 --codex 指定')
+            LocalModel.expected_model = 'relay-agent-override-model'
+            LocalModel.expected_effort = 'xhigh'
+            for mode in ('render-callback', 'render-env-key', 'wrapper'):
+                provider_id = 'probe-env' if mode == 'render-env-key' else 'probe'
+                if mode == 'render-env-key':
+                    run([relay, 'provider', 'add', '--id', provider_id, '--target', 'codex',
+                         '--base-url', base_url, '--model', MODEL, '--secret-mode', 'env_key',
+                         '--api-key-stdin'], cwd, env, args.timeout, FAKE_KEY + '\n')
+                original = ("[shell_environment_policy]\nfilters = { 'RELAY_*' = 'exclude' }\n"
+                            "[model_providers.custom]\nname='Unrelated provider'\nwire_api='responses'\n")
+                if mode == 'render-env-key':
+                    original += "auth={command='unused-relay-probe-helper'}\n"
+                else:
+                    original += "env_key='UNUSED_RELAY_PROBE_KEY'\n"
+                (codex_home / 'config.toml').write_text(original, encoding='utf-8')
+                config_before = (codex_home / 'config.toml').read_bytes()
+                profiles_before = {p.name: p.read_bytes() for p in codex_home.glob('*.config.toml')}
+                child_env = env.copy()
+                if mode == 'wrapper':
+                    argv = [wrapper, 'app-server', '--listen', 'stdio://']
+                else:
+                    rendered = json.loads(run([relay, 'provider', 'render-args', 'codex', provider_id,
+                                               '--runtime', 'app-server'], cwd, env, args.timeout))
+                    check('--profile' not in rendered and FAKE_KEY not in str(rendered),
+                          'app-server 参数包含 profile 或凭据')
+                    payload = json.loads(run([relay, 'provider', 'render-env', 'codex', provider_id,
+                                              '--runtime', 'app-server', '--format', 'json'],
+                                             cwd, env, args.timeout, sensitive_output=True))
+                    for key in payload['unset']:
+                        child_env.pop(key, None)
+                    child_env.update(payload['env'])
+                    argv = [native, 'app-server', '--listen', 'stdio://', *rendered]
+                before = len(LocalModel.observations)
+                rpc = RPC(argv, cwd, child_env, args.timeout)
+                cleanup.callback(stop_tree, rpc.process)
+                rpc.request('initialize', {'clientInfo': {'name': 'relay-integration',
+                            'title': 'Relay 集成测试', 'version': '0.1.0'},
+                            'capabilities': {'experimentalApi': True}})
+                rpc.send('initialized', {})
+                config = rpc.request('config/read', {'includeLayers': False})['config']
+                check(config['model_provider'] == 'relay_' + provider_id,
+                      'app-server 未选择 Relay 独立供应商')
+                check(config['model'] == MODEL, '供应商默认模型未渲染')
+                definition = config['model_providers']['relay_' + provider_id]
+                check(bool(definition.get('env_key')) == (mode == 'render-env-key') and
+                      bool(definition.get('auth')) == (mode != 'render-env-key'), '鉴权混入旧配置')
+                thread = rpc.request('thread/start', {'cwd': str(cwd),
+                                     'model': LocalModel.expected_model,
+                                     'config': {'model_reasoning_effort': 'xhigh'},
+                                     'approvalPolicy': 'never', 'sandbox': 'read-only',
+                                     'experimentalRawEvents': False, 'persistExtendedHistory': True})
+                thread_id = thread['thread']['id']
+                rpc.request('turn/start', {'threadId': thread_id, 'effort': 'xhigh', 'input': [
+                    {'type': 'text', 'text': 'Reply ' + ANSWER + ' without tools.'}]})
+                completed = rpc.wait(lambda frame: frame.get('method') == 'turn/completed'
+                                     and frame.get('params', {}).get('threadId') == thread_id)
+                check(completed['params']['turn']['status'] == 'completed', 'app-server 模型回合失败')
+                history = rpc.request('thread/read', {'threadId': thread_id, 'includeTurns': True})
+                items = [item for turn in history['thread']['turns'] for item in turn['items']]
+                check(any(item.get('type') == 'agentMessage' and ANSWER in item.get('text', '')
+                          for item in items), 'thread/read 没有返回刚生成的助手回复')
+                code = rpc.close()
+                if mode == 'wrapper':
+                    verify_metadata(relay_home, thread_id, cwd)
+                check((codex_home / 'config.toml').read_bytes() == config_before and
+                      {p.name: p.read_bytes() for p in codex_home.glob('*.config.toml')} == profiles_before,
+                      'app-server 渲染或启动修改了主配置或 profile')
+                check(len(LocalModel.observations) > before and
+                      all(all(row.values()) for row in LocalModel.observations[before:]),
+                      'app-server 未传递正确鉴权、Agent 模型或推理等级')
+                print(json.dumps({'步骤': mode, '退出码': code, 'JSON-RPC': rpc.calls,
+                                  '正确鉴权': True, 'Agent模型覆盖': True, 'xhigh': True,
+                                  'thread/read': True, '主配置及profile不变': True}, ensure_ascii=False))
+                rpc = None
     finally:
         if rpc is not None:
             stop_tree(rpc.process)

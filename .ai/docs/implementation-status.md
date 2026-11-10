@@ -1,6 +1,16 @@
 # 实现与验收记录
 
-日期：2026-09-17；最近更新：2026-10-09。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+日期：2026-09-17；最近更新：2026-11-10。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+
+## 2026-11-10：v0.1.6 发布验证（Spec v0.15）
+
+- 发布范围：包含此前未推送的 Claude 全局认证冲突与 Windows 回调引号修复、`relay notify` 远程通知，以及本次 Codex 适配更新。普通 CLI 使用独立 `CODEX_HOME`，共享原生会话、SQLite 和 Skills；模型与推理档位按供应商保存。新增 `--runtime app-server` 与包装模式的独立供应商参数，修复残缺托管标记阻断切换的问题。契约及上游差异详见 `relay-spec.md` 与 `internal/adapter/codex/NOTES.md`。
+- Windows 本地执行 `go test ./...`、`go vet ./...`、`go build -trimpath -o bin/relay.exe ./cmd/relay`，退出码均为 0。
+- `python -X utf8 scripts/test_installers.py --binary bin/relay.exe`、`python -X utf8 scripts/test_uninstallers.py`、`python -X utf8 scripts/test_installers.py --binary bin/relay.exe --powershell pwsh` 均退出 0。当前进程无创建符号链接权限，安装器相应测试按脚本规则跳过；其余安装、升级、补全、校验失败保护、卸载和数据保留检查通过。
+- 设置 `RELAY_CODEX_INTEGRATION=1` 后执行 `go test ./internal/adapter/codex -run '^TestLocalCodex' -v -count=1`，退出 0：旧 `custom=false` 保存失败对照成立，新 callback/env_key 配置可保存并在重启后保留模型偏好，跨供应商 `thread/resume` 与 `exec resume` 成功。
+- `python -X utf8 scripts/verify_codex_relay.py --relay bin/relay.exe` 退出 0：`relay exec`、app-server callback/env_key 渲染与 wrapper 完成回合，鉴权、RPC 模型覆盖、推理等级、历史回读及主配置/profile 不变检查通过。
+- 上述测试仅使用虚构凭据、自动清理的隔离目录和 127.0.0.1 假服务，不修改真实 Claude Code/Codex/Multica 配置。临时测试目录由测试框架回收；`bin/relay.exe` 保留供本次验证复核且已由 Git 忽略，本地 `.zcode/` 会话计划不纳入发布。
+- 远端 `master` 启用了必须通过 PR 合入的分支保护；发布分支通过三系统 CI 后经 PR 合入 `master`，再推送 `v0.1.6` 标签。标签工作流重跑三系统测试、Linux race 与五平台打包验证后生成 Release 和安装附件。远端结果以对应提交的 GitHub Actions 及 Release 为准。
 
 ## 2026-10-09：修复 Claude 全局 settings 的认证冲突警告
 

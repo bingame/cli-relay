@@ -17,16 +17,27 @@ import (
 	"time"
 
 	"github.com/bingame/cli-relay/internal/adapter"
+	"github.com/pelletier/go-toml/v2"
 )
+
+// 测试凭据仅经隔离进程环境输出，不落 argv 或配置文件。
+func TestCodexCredentialHelper(t *testing.T) {
+	if os.Getenv("RELAY_TEST_AUTH_HELPER") != "1" {
+		return
+	}
+	fmt.Print(os.Getenv("RELAY_TEST_FAKE_CREDENTIAL"))
+	os.Exit(0)
+}
 
 // 显式开启才调用本机 Codex；模型请求只访问 127.0.0.1 假 SSE 服务。
 // PowerShell: $env:RELAY_CODEX_INTEGRATION='1'; go test ./internal/adapter/codex -run TestLocalCodexIntegration -v
 func TestLocalCodexIntegration(t *testing.T) {
+	t.Setenv("CODEX_SQLITE_HOME", "")
 	if os.Getenv("RELAY_CODEX_INTEGRATION") != "1" {
 		t.Skip("设置 RELAY_CODEX_INTEGRATION=1 才运行本机隔离集成测试")
 	}
 	binary := integrationBinary(t)
-	for _, testCase := range []string{"override", "profile", "global-switch-with-old-default-profile"} {
+	for _, testCase := range []string{"profile", "profile-over-base-auth", "profile-over-base-env", "global-switch-with-old-default-profile"} {
 		t.Run(testCase, func(t *testing.T) {
 			var authenticated atomic.Bool
 			var receivedModel atomic.Bool
@@ -48,20 +59,7 @@ func TestLocalCodexIntegration(t *testing.T) {
 				if r.Header.Get("Authorization") == "Bearer "+dummyKey {
 					authenticated.Store(true)
 				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				message := map[string]any{"id": "msg_relay_test", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "RELAY_LOCAL_PROBE_OK", "annotations": []any{}}}}
-				response := map[string]any{"id": "resp_relay_test", "object": "response", "status": "completed", "output": []any{message}, "usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
-				events := []map[string]any{
-					{"type": "response.created", "response": map[string]any{"id": "resp_relay_test", "object": "response", "status": "in_progress", "output": []any{}}},
-					{"type": "response.output_item.added", "output_index": 0, "item": message},
-					{"type": "response.output_text.delta", "item_id": "msg_relay_test", "output_index": 0, "content_index": 0, "delta": "RELAY_LOCAL_PROBE_OK"},
-					{"type": "response.output_item.done", "output_index": 0, "item": message},
-					{"type": "response.completed", "response": response},
-				}
-				for _, event := range events {
-					data, _ := json.Marshal(event)
-					fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], data)
-				}
+				writeProbeResponse(w)
 			}))
 			defer server.Close()
 			root := t.TempDir()
@@ -71,6 +69,14 @@ func TestLocalCodexIntegration(t *testing.T) {
 			}
 			// 证明从模型 shell 环境排除鉴权变量，不妨碍 Codex 自身读取 env_key。
 			config := "[shell_environment_policy]\nfilters = { 'RELAY_*' = 'exclude' }\n"
+			if testCase == "profile-over-base-auth" || testCase == "profile-over-base-env" {
+				config = "model_provider = 'custom'\nmodel = 'wrong-base-model'\n" + config + "\n[model_providers.custom]\nname = 'wrong-base-provider'\nbase_url = 'http://127.0.0.1:1/v1'\nwire_api = 'responses'\nrequest_max_retries = 0\n"
+				if testCase == "profile-over-base-auth" {
+					config += "[model_providers.custom.auth]\ncommand = 'must-not-run-base-auth'\n"
+				} else {
+					config += "env_key = 'MUST_NOT_READ_BASE_KEY'\n"
+				}
+			}
 			if testCase == "global-switch-with-old-default-profile" {
 				config = "profile = 'old-manual' # 原来的默认 profile\nmodel = 'old-model'\nmodel_provider = 'openai'\n" + config + "\n[profiles.historical]\nmodel = 'historical-model'\n"
 				if err := os.WriteFile(filepath.Join(home, "old-manual.config.toml"), []byte("model='old-profile-model'\n"), 0600); err != nil {
@@ -82,6 +88,7 @@ func TestLocalCodexIntegration(t *testing.T) {
 			}
 			p := sampleProvider()
 			p.ID, p.BaseURL, p.Model = "local-integration", server.URL+"/v1", "relay-local-test-model"
+			p.SecretMode = "env_key"
 			p.Extra = map[string]any{"codex_config": map[string]any{"model_provider": "test", "model_providers": map[string]any{"test": map[string]any{"request_max_retries": 0, "stream_max_retries": 0}}}}
 			// 模拟 Provider 经 SQLite JSON 列往返，覆盖整数被标准 JSON 解码成 float64 的路径。
 			stored, err := json.Marshal(p)
@@ -97,12 +104,23 @@ func TestLocalCodexIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if testCase != "override" {
-				if err := a.ApplyGlobal(artifact, home); err != nil {
+			if testCase == "profile-over-base-env" {
+				// 用本测试二进制充当虚构凭据回调，验证 auth 覆盖继承的 env_key。
+				helper, err := os.Executable()
+				if err != nil {
 					t.Fatal(err)
 				}
-				if testCase == "profile" {
-					a.LaunchMode = "profile"
+				def := artifact.Config["model_providers"].(map[string]any)[nativeProviderID].(map[string]any)
+				delete(def, "env_key")
+				def["auth"] = map[string]any{"command": helper, "args": []string{"-test.run=^TestCodexCredentialHelper$"}}
+				artifact.Content, err = toml.Marshal(artifact.Config)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if testCase == "global-switch-with-old-default-profile" {
+				if err := a.ApplyGlobal(artifact, home); err != nil {
+					t.Fatal(err)
 				}
 			}
 			inputs, err := a.BuildLaunchInputs(artifact, adapter.ResolvedSecrets{"api_key": dummyKey})
@@ -118,17 +136,9 @@ func TestLocalCodexIntegration(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, inputs.Binary, args...)
-			cmd.Dir = root
-			// 从白名单构造宿主环境，隔离用户配置与真实凭据。
-			for _, key := range []string{"PATH", "SystemRoot", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT"} {
-				if value := os.Getenv(key); value != "" {
-					cmd.Env = append(cmd.Env, key+"="+value)
-				}
-			}
-			cmd.Env = append(cmd.Env, "HOME="+root, "USERPROFILE="+root, "APPDATA="+root, "LOCALAPPDATA="+root, "TEMP="+root, "TMP="+root, "CODEX_HOME="+home, "NO_COLOR=1")
-			for key, value := range inputs.Env {
-				cmd.Env = append(cmd.Env, key+"="+value)
+			cmd := integrationCommand(ctx, inputs.Binary, args, root, home, server.URL, inputs.Env)
+			if testCase == "profile-over-base-env" {
+				cmd.Env = append(cmd.Env, "RELAY_TEST_AUTH_HELPER=1", "RELAY_TEST_FAKE_CREDENTIAL="+dummyKey)
 			}
 			output, err := cmd.CombinedOutput()
 			if err != nil || !authenticated.Load() || !receivedModel.Load() || !strings.Contains(string(output), "turn.completed") || !strings.Contains(string(output), "RELAY_LOCAL_PROBE_OK") {
@@ -140,6 +150,45 @@ func TestLocalCodexIntegration(t *testing.T) {
 			}
 			t.Log("真实适配器参数已被 Codex 接受；本地假服务收到正确鉴权和模型，输出 turn.completed")
 		})
+	}
+}
+
+func integrationCommand(ctx context.Context, binary string, args []string, root, home, proxy string, env map[string]string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binary, args...)
+	cmd.Dir = root
+	// 从白名单构造宿主环境，隔离用户配置与真实凭据。
+	for _, key := range []string{"PATH", "SystemRoot", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT"} {
+		if value := os.Getenv(key); value != "" {
+			cmd.Env = append(cmd.Env, key+"="+value)
+		}
+	}
+	// 显式把代理也指向假服务，覆盖 Windows 系统代理；假服务不转发请求。
+	cmd.Env = append(cmd.Env, "HOME="+root, "USERPROFILE="+root, "APPDATA="+root, "LOCALAPPDATA="+root, "TEMP="+root, "TMP="+root, "CODEX_HOME="+home, "NO_COLOR=1", "HTTP_PROXY="+proxy, "HTTPS_PROXY="+proxy, "ALL_PROXY="+proxy)
+	for key, value := range env {
+		for i := len(cmd.Env) - 1; i >= 0; i-- {
+			if strings.HasPrefix(cmd.Env[i], key+"=") {
+				cmd.Env = append(cmd.Env[:i], cmd.Env[i+1:]...)
+			}
+		}
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	return cmd
+}
+
+func writeProbeResponse(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	message := map[string]any{"id": "msg_relay_test", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "RELAY_LOCAL_PROBE_OK", "annotations": []any{}}}}
+	response := map[string]any{"id": "resp_relay_test", "object": "response", "status": "completed", "output": []any{message}, "usage": map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+	events := []map[string]any{
+		{"type": "response.created", "response": map[string]any{"id": "resp_relay_test", "object": "response", "status": "in_progress", "output": []any{}}},
+		{"type": "response.output_item.added", "output_index": 0, "item": message},
+		{"type": "response.output_text.delta", "item_id": "msg_relay_test", "output_index": 0, "content_index": 0, "delta": "RELAY_LOCAL_PROBE_OK"},
+		{"type": "response.output_item.done", "output_index": 0, "item": message},
+		{"type": "response.completed", "response": response},
+	}
+	for _, event := range events {
+		data, _ := json.Marshal(event)
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event["type"], data)
 	}
 }
 

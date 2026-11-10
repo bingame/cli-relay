@@ -150,7 +150,13 @@ relay run claude --provider example -- --append-system-prompt-file ./CLAUDE.md
 
 导入的非敏感 Claude settings 经渲染文件传入；Relay 托管的 Claude 凭据走 `apiKeyHelper` 回调，不把明文密钥写入原生配置。`switch` 用 `.relay-managed.json` 记录管理字段，切换时覆盖 Relay 管理范围内的字段并保留其他用户字段；同时删除全局 `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY`，避免它们与 `apiKeyHelper` 同时存在而产生认证冲突警告。
 
-Codex 统一使用独立 profile 启动（`--profile <id>`，对应 `$CODEX_HOME/<id>.config.toml`），未执行 switch 也可临时运行；`BuildLaunchInputs` 会把 `[model_providers.<id>]` 注册进 `~/.codex/config.toml` 并安装 profile 文件。`switch` 还会把已声明的 `model_catalog_json` 写入主配置，因此直接启动 `codex`（不带 `--profile`）也能使用对应模型列表。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 已废弃（保留 flag 兼容，不再影响行为）。Codex 0.134.0 起 profile 已改为 `<name>.config.toml`，不再使用规范初稿中的 `[profiles.name]`。shell 环境过滤不影响 Codex 自身 `env_key` 鉴权，Relay 不主动放宽 shell allowlist。
+Codex 原生 `model_provider` 保持 `custom`，兼容 cc-switch 的同身份会话。临时 `run`/`exec` 使用原生 `$CODEX_HOME/.relay/<Relay目录摘要>/<供应商ID及摘要>/config.toml`，整体替换供应商表，继承原生设置、MCP 和通知，主 `config.toml` 逐字节不变。会话目录、SQLite、Skills、插件和规则共享原生内容；Windows 用 Junction/硬链接，不要求管理员权限。独立 daemon、缓存和日志留在各供应商目录。
+
+**模型和推理档位现在可以保存，并在下次启动同一供应商时保留。** 修改 Relay 供应商对应默认值后采用新值；其他设置每次启动从原配置刷新。旧的 `custom=false` profile 不再被启动路径加载，不必手工删除。`switch` 仍表示显式修改全局默认，默认 callback 模式随后可直接运行 `codex`。已有运行中的旧 Relay 会话需退出并重新启动。
+
+普通 CLI 外部启动器必须同时消费 `render-args` 和 `render-env --format json`：先删除 `unset`，再应用 `env`，其中包含独立 `CODEX_HOME` 与共享 `CODEX_SQLITE_HOME`。默认 callback 的主凭据仍由回调获取；继承 MCP 的静态鉴权 header 和凭据环境变量转为进程环境引用。生成参数不再使用 `--profile`。`--codex-launch-mode` / `RELAY_CODEX_LAUNCH_MODE` 保留为兼容选项。
+
+Multica 继续使用下方的 `--runtime app-server`：其独立原生 ID 和纯 `-c` 路径保持不变。旧版独立原生 ID 会话或不同网关的历史协议不兼容时，仍使用 Handoff。配置保存、Skills 发现、会话列表和恢复的隔离验证见 [Codex NOTES](internal/adapter/codex/NOTES.md)。
 
 **模型映射只在供应商真的声明过时才生效**：从 cc-switch 导入时，只有源里的「模型映射」非空才会写入 `provider_models`，进而在 Codex 侧渲染 `model_catalog_json`、在 Claude Code 侧渲染 `modelPicker`；没有声明就不渲染任何模型列表，把模型发现交回 CLI 原生机制（Codex 自己拉 `/v1/models`，Claude Code 用内置菜单与原生环境变量）。手工 `provider add --model X` 属于用户显式声明，会写入一条模型记录。逐模型可编辑的字段与 cc-switch 一致：Codex 是显示名、请求模型、上下文窗口、思考档位；Claude Code 是显示名、请求模型、1M 上下文与默认兜底模型。
 
@@ -225,13 +231,15 @@ relay handoff continue --doc handoff.md --cli codex --exec
 推荐只使用渲染器：
 
 ```sh
-relay provider render-env codex example --format json | \
-  multica agent create --name relay-agent --runtime-id codex \
-  --custom-args "$(relay provider render-args codex example)" \
-  --custom-env-stdin
+multica agent create --name relay-agent --runtime-id "$CODEX_RUNTIME_ID" \
+  --custom-args "$(relay provider render-args codex example --runtime app-server)"
 ```
 
-`render-env` 的 JSON 输出包含 `env`（要注入的变量）和 `unset`（要先从进程环境中删除的变量，如 `ANTHROPIC_AUTH_TOKEN`）。**Multica 合并输出前必须先删除 `unset` 列出的变量**，否则继承的旧凭据会覆盖回调凭据。`render-env` 是敏感输出，不要打印到共享终端、CI 日志或长期文件。Multica 会按它自己的存储规则持有这些配置；Relay 不会替 Multica 管理后续密钥生命周期。
+`CODEX_RUNTIME_ID` 是 Multica 已注册的 Codex runtime ID。默认 callback 模式不需要把主凭据写入 Agent 的 `custom_env`。Windows 传递 JSON 参数时应直接调用 Multica 的真实 `.exe`，避免 `.cmd` shim 二次解析引号。
+
+**Codex 0.166.0 的 app-server 不接受 `--profile`**，因此 Multica 必须选择 `--runtime app-server`；省略该选项使用普通 Codex CLI 的隔离目录启动方式，须一并应用 render-env。新入口输出合法 TOML 内联表和模型设置的纯 `-c` 数组，不安装 profile、不修改主配置。app-server 使用独立的 `relay_<provider_id>` 原生 Provider ID，避免继承 cc-switch/全局 `custom` 槽的鉴权字段。该身份与普通 CLI 的 `custom`、已有手工 Agent 的供应商 ID 不同，不能直接恢复这些旧身份的会话；需要时走 Handoff。Agent 的一等 `model` 和 `thinking_level` 字段经 Multica RPC 覆盖供应商默认值。
+
+`render-env --runtime app-server --format json` 的 JSON 输出包含 `env`（要注入的变量）和 `unset`（要先从进程环境中删除的变量）。**这不是 Multica `custom_env` 接受的扁平对象，不能原样管入 `--custom-env-stdin`**；自定义启动器应先处理 `unset` 再合并 `env`。`render-env` 是敏感输出，不要打印到共享终端、CI 日志或长期文件。Multica 会按它自己的存储规则持有这些配置；Relay 不会替 Multica 管理后续密钥生命周期。
 
 若只替换可执行文件路径，可以把同一二进制复制或链接为 `relay-codex` / `relay-claude`（Windows 加 `.exe`）。Relay 根据文件名进入包装模式，`RELAY_PROVIDER` 指定供应商，未设置则用 current。把 Multica 的原生可执行文件路径指向这个实际文件；**不要把带参数的整串命令填进可执行文件路径字段**。
 
@@ -240,7 +248,7 @@ Copy-Item .\bin\relay.exe .\bin\relay-codex.exe
 # 在 Multica 启动进程的环境中配置 RELAY_PROVIDER=example、RELAY_HOME=对应目录
 ```
 
-包装模式保留 Codex stdio RPC；不会为 app-server 额外插入 exec，也不会把外层已经回答的问题再次当成退出码 11。
+包装模式自动为 app-server 选择同一份无 profile 参数，保留 Codex stdio RPC；不会额外插入 exec，也不会把外层已经回答的问题再次当成退出码 11。
 
 Claude 接入还受其 settings 隔离限制：Multica 写入工作目录的 `CLAUDE.md` 需要显式传入；若 Multica 开启了自行注入 `--settings` 的技能管理策略，会与 Relay 管理的 settings 竞争，当前会明确拒绝该启动。上述端到端包装验证针对 Codex，不能视为所有 Multica Claude 策略组合的兼容保证。
 

@@ -324,13 +324,22 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 		name = "render-env"
 	}
 	format := "dotenv"
+	runtime := "cli"
 	cmd := &cobra.Command{Use: name + " <cli> <provider>", Short: "输出原生启动片段；render-env 是敏感输出", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		if runtime != "cli" && runtime != "app-server" {
+			return fmt.Errorf("runtime 必须为 cli 或 app-server")
+		}
 		if env && format != "dotenv" && format != "json" {
 			return fmt.Errorf("format 必须为 dotenv 或 json")
 		}
 		ad, e := a.adapter(args[0])
 		if e != nil {
 			return e
+		}
+		if runtime == "app-server" {
+			if _, ok := ad.(adapter.AppServerLaunchAdapter); !ok {
+				return fmt.Errorf("指定 CLI 不支持 app-server runtime")
+			}
 		}
 		unlock, e := a.lock(cmd.Context())
 		if e != nil {
@@ -374,7 +383,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 				return e
 			}
 		}
-		inputs, e := ad.BuildLaunchInputs(artifact, adapter.ResolvedSecrets(sec))
+		inputs, e := buildRuntimeInputs(ad, artifact, adapter.ResolvedSecrets(sec), runtime == "app-server")
 		if e != nil {
 			return e
 		}
@@ -417,6 +426,7 @@ func (a *App) renderCommand(env bool) *cobra.Command {
 	if env {
 		cmd.Flags().StringVar(&format, "format", "dotenv", "dotenv 或 json（Multica 需要 json）")
 	}
+	cmd.Flags().StringVar(&runtime, "runtime", "cli", "启动入口：cli 或 app-server（Multica Codex 使用 app-server）")
 	cmd.ValidArgsFunction = a.completeProviderArg()
 	return cmd
 }

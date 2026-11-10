@@ -11,10 +11,24 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func buildRuntimeInputs(ad adapter.LaunchAdapter, artifact adapter.Artifact, secrets adapter.ResolvedSecrets, appServer bool) (adapter.LaunchInputs, error) {
+	if appServer {
+		if runtime, ok := ad.(adapter.AppServerLaunchAdapter); ok {
+			return runtime.BuildAppServerInputs(artifact, secrets)
+		}
+		return adapter.LaunchInputs{}, fmt.Errorf("指定 CLI 不支持 app-server runtime")
+	}
+	return ad.BuildLaunchInputs(artifact, secrets)
+}
+
 func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, native []string) (process.Options, error) {
 	ad, e := a.adapter(target)
 	if e != nil {
 		return process.Options{}, e
+	}
+	bridge := false
+	if protocol, ok := ad.(interface{ IsProtocolBridge([]string) bool }); ok {
+		bridge = protocol.IsProtocolBridge(native)
 	}
 	if id == "" {
 		current, e := a.current()
@@ -69,9 +83,16 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 		if e != nil {
 			return process.Options{}, e
 		}
-		inputs, e = ad.BuildLaunchInputs(artifact, adapter.ResolvedSecrets(sec))
+		inputs, e = buildRuntimeInputs(ad, artifact, adapter.ResolvedSecrets(sec), bridge)
 		if e != nil {
 			return process.Options{}, e
+		}
+		// 隔离 Codex 配置可能把继承的 MCP 凭据移到进程环境，同样需要输出脱敏。
+		for key, value := range inputs.Env {
+			upper := strings.ToUpper(key)
+			if target == "codex" && value != "" && (strings.Contains(upper, "TOKEN") || strings.Contains(upper, "SECRET") || strings.Contains(upper, "KEY") || strings.Contains(upper, "PASSWORD") || strings.Contains(upper, "PASSPHRASE") || strings.Contains(upper, "CREDENTIAL") || strings.Contains(upper, "AUTHORIZATION") || strings.Contains(upper, "BEARER") || strings.Contains(upper, "COOKIE") || strings.HasPrefix(upper, "RELAY_MCP_")) {
+				values = append(values, value)
+			}
 		}
 		// 回调式密钥由子进程内部的 relay secret get 再解密一次；process.Environment 默认
 		// 会剥掉 RELAY_PASSPHRASE，无系统密钥库环境下回调会因无法解锁而失败。
@@ -97,10 +118,6 @@ func (a *App) prepare(cmd *cobra.Command, target, id string, mode adapter.Mode, 
 		return process.Options{}, e
 	}
 	inputs.Args = append(inputs.Args, args...)
-	bridge := false
-	if protocol, ok := ad.(interface{ IsProtocolBridge([]string) bool }); ok {
-		bridge = protocol.IsProtocolBridge(args)
-	}
 	if binary := os.Getenv("RELAY_" + strings.ToUpper(strings.ReplaceAll(target, "-", "_")) + "_BIN"); binary != "" {
 		inputs.Binary = binary
 	}

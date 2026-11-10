@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/bingame/cli-relay/internal/adapter"
@@ -29,10 +30,12 @@ func (a *Adapter) Target() string { return "codex" }
 var _ adapter.LaunchAdapter = (*Adapter)(nil)
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+const nativeProviderID = "custom"
+
 func names(id string) (string, string) {
 	digest := sha256.Sum256([]byte(id))
 	slug := strings.ReplaceAll(id, "-", "_")
-	return id, fmt.Sprintf("RELAY_%s_%X_KEY", strings.ToUpper(slug), digest[:6])
+	return nativeProviderID, fmt.Sprintf("RELAY_%s_%X_KEY", strings.ToUpper(slug), digest[:6])
 }
 
 var providerFields = map[string]bool{
@@ -257,7 +260,7 @@ func artifactConfig(artifact adapter.Artifact) (map[string]any, map[string]any, 
 	if artifact.Target != "codex" || !provider.ValidID(artifact.ProviderID) {
 		return nil, nil, "", fmt.Errorf("无效的 Codex 配置产物")
 	}
-	id, envKey := names(artifact.ProviderID)
+	nativeID, envKey := names(artifact.ProviderID)
 	if artifact.EnvKey != envKey {
 		return nil, nil, "", fmt.Errorf("Codex 配置产物的环境变量名不匹配")
 	}
@@ -269,14 +272,14 @@ func artifactConfig(artifact adapter.Artifact) (map[string]any, map[string]any, 
 		return nil, nil, "", fmt.Errorf("Codex 配置产物包含凭据字段")
 	}
 	profile := artifact.Profile
-	if profile == nil || profile["model_provider"] != id {
+	if profile == nil || profile["model_provider"] != nativeID {
 		return nil, nil, "", fmt.Errorf("Codex 配置产物的供应商指针不匹配")
 	}
 	defs, ok := config["model_providers"].(map[string]any)
 	if !ok || len(defs) != 1 {
 		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少独立供应商定义")
 	}
-	def, ok := defs[id].(map[string]any)
+	def, ok := defs[nativeID].(map[string]any)
 	if !ok {
 		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少供应商定义")
 	}
@@ -284,11 +287,19 @@ func artifactConfig(artifact adapter.Artifact) (map[string]any, map[string]any, 
 	if !callback && def["env_key"] != envKey {
 		return nil, nil, "", fmt.Errorf("Codex 配置产物缺少有效鉴权配置")
 	}
-	return config, profile, id, nil
+	return config, profile, artifact.ProviderID, nil
 }
 
 func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
-	config, _, id, err := artifactConfig(artifact)
+	return a.buildLaunchInputs(artifact, secrets, false)
+}
+
+func (a *Adapter) BuildAppServerInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets) (adapter.LaunchInputs, error) {
+	return a.buildLaunchInputs(artifact, secrets, true)
+}
+
+func (a *Adapter) buildLaunchInputs(artifact adapter.Artifact, secrets adapter.ResolvedSecrets, appServer bool) (adapter.LaunchInputs, error) {
+	config, profile, relayID, err := artifactConfig(artifact)
 	if err != nil {
 		return adapter.LaunchInputs{}, err
 	}
@@ -297,7 +308,8 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.R
 		binary = "codex"
 	}
 	inputs := adapter.LaunchInputs{Binary: binary, Env: map[string]string{}, UnsetEnv: []string{artifact.EnvKey}}
-	def := config["model_providers"].(map[string]any)[id].(map[string]any)
+	nativeID, _ := names(relayID)
+	def := config["model_providers"].(map[string]any)[nativeID].(map[string]any)
 	if def["env_key"] == artifact.EnvKey {
 		if key := secrets["api_key"]; key != "" {
 			inputs.Env[artifact.EnvKey] = key
@@ -319,14 +331,49 @@ func (a *Adapter) BuildLaunchInputs(artifact adapter.Artifact, secrets adapter.R
 	if strings.ContainsRune(inputs.Env[artifact.EnvKey], 0) {
 		return adapter.LaunchInputs{}, fmt.Errorf("密钥包含环境变量不支持的字符")
 	}
+	encoded, err := inlineTOML(def)
+	if err != nil {
+		return adapter.LaunchInputs{}, err
+	}
+	if appServer {
+		// app-server 不接受 profile，独立命名空间避免与主配置的 custom 鉴权深合并。
+		id := "relay_" + relayID
+		inputs.Args = []string{"-c", "model_providers." + id + "=" + encoded}
+		keys := make([]string, 0, len(profile))
+		for key := range profile {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			value := profile[key]
+			if key == "model_provider" {
+				value = id
+			}
+			encoded, err := inlineTOML(value)
+			if err != nil {
+				return adapter.LaunchInputs{}, err
+			}
+			inputs.Args = append(inputs.Args, "-c", key+"="+encoded)
+		}
+		return inputs, nil
+	}
 	home, err := a.nativeHome()
 	if err != nil {
 		return adapter.LaunchInputs{}, err
 	}
-	if err := a.install(artifact, home, false); err != nil {
+	scopedHome, inheritedEnv, err := prepareScopedHome(artifact, home)
+	if err != nil {
 		return adapter.LaunchInputs{}, err
 	}
-	inputs.Args = []string{"--profile", id}
+	for key, value := range inheritedEnv {
+		if _, exists := inputs.Env[key]; !exists {
+			inputs.Env[key] = value
+		}
+	}
+	inputs.Env["CODEX_HOME"] = scopedHome
+	// 配置和 daemon 按供应商隔离；SQLite 与 rollout 共用原生目录，保留历史发现。
+	inputs.Env["CODEX_SQLITE_HOME"] = inheritedEnv["CODEX_SQLITE_HOME"]
+	inputs.Args = []string{}
 	return inputs, nil
 }
 

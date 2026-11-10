@@ -36,3 +36,7 @@ type LaunchAdapter interface {
 	ResumeArgs(string) []string
 	InstallSkill(targetDir string) error
 }
+
+type AppServerLaunchAdapter interface {
+	BuildAppServerInputs(Artifact, ResolvedSecrets) (LaunchInputs, error)
+}
