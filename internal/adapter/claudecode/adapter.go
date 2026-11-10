@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -48,8 +49,9 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 				// 旧版 cc-switch 可能把凭据放在 env 中；Relay 统一改用
 				// apiKeyHelper，并清除继承的 ANTHROPIC_AUTH_TOKEN/API_KEY，
 				// 避免 Claude Code 报告鉴权来源冲突。
-				delete(values, "ANTHROPIC_AUTH_TOKEN")
-				delete(values, "ANTHROPIC_API_KEY")
+				for _, name := range claudeCredentialEnv {
+					delete(values, name)
+				}
 			}
 			settings["env"] = env
 		}
@@ -76,7 +78,7 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 	}
 	// 回调绑定渲染时的数据目录：Multica/relay-codex 等外部启动方式可能不带 --home，
 	// 不传则会解析到默认 ~/.relay，同名供应商下可能读错密钥。
-	settings["apiKeyHelper"] = "relay --home " + shellQuote(relayHome) + " secret get claude " + p.ID
+	settings["apiKeyHelper"] = "relay --home " + helperQuote(relayHome) + " secret get claude " + p.ID
 	if len(models) > 0 {
 		options := make([]map[string]any, 0, len(models))
 		for _, model := range models {
@@ -109,10 +111,23 @@ func (a *Adapter) Render(p provider.Provider, relayRoot string, models ...provid
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// shellQuote 按 POSIX 单引号规则转义，供 apiKeyHelper 这类由 shell 解析的回调命令使用。
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'" + `\` + "''") + "'"
+// helperQuote 为 apiKeyHelper 回调命令中的路径加引号。Claude Code 在 Windows 上
+// 用 cmd 解析该字符串，POSIX 单引号不会被 cmd 识别、会被当成路径的一部分
+// （报 CreateFile ...\'C:\... 语法错误），因此按运行时平台选择引号方式：
+// Windows 路径无空格时不加引号，有空格或需要转义时用 cmd 的双引号转义；
+// 其他平台沿用 POSIX 单引号。
+func helperQuote(value string) string {
+	if runtime.GOOS == "windows" {
+		if !strings.ContainsAny(value, " \t&()[]{}^=;!'+,`~%\"") {
+			return value
+		}
+		return "\"" + strings.ReplaceAll(value, "\"", `""`) + "\""
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'"+`\`+"''") + "'"
 }
+
+// 这两项与 apiKeyHelper 同时存在时会让 Claude Code 警告认证来源冲突。
+var claudeCredentialEnv = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"}
 
 // 清除继承的身份、模型与第三方路由，避免上一供应商污染本次启动。
 var providerEnv = []string{

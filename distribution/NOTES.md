@@ -16,6 +16,12 @@
 4. 没有 `PACKAGE_REPO_TOKEN` 时，发布仍生成 formula 和 manifest，作为 Release 附件交付，但不向软件源提交。预发布版本也不推进正式软件源。
 5. 推荐顺序：先在仍为私有的仓库提交并通过 CI，再创建一个包含安装与卸载脚本的正式 Release，验证 Release 附件后切换仓库为 Public。这样公开后的 README 链接立即可用，也不会出现公开仓库指向尚未发布的卸载脚本。
 
+## 个人项目自动合并（2026-11-10）
+
+用户已明确授权本项目无需人工批准 PR。`master` 保留 PR 入口，必需人工审批数为 0，启用仓库自动合并；必需 GitHub Actions 检查为 `test (ubuntu-latest)`、`test (macos-latest)`、`test (windows-latest)`、`packages`，且要求分支与主线同步。管理员仍受规则约束，禁止强推和删除，讨论必须解决。
+
+创建发布 PR 后执行 `gh pr merge <PR编号> --repo bingame/cli-relay --auto --merge`，由 GitHub 在检查通过后自动合并，不要求用户手动批准。合并后同步本地 `master`，按上文推送版本标签并跟进发布工作流。若标签已在同一份通过验证的发布代码上创建，不改写标签；将该提交通过 PR 合入主线即可。
+
 ## 安装行为
 
 - 默认选择最新稳定 Release，也可用 `RELAY_VERSION=v0.1.0` 固定版本。公开模式直接通过 GitHub 的 `releases/latest/download` 下载资产，避免匿名调用 GitHub API 触发出口 IP 限流；私有模式仍由 `gh` 解析具体 tag。仅允许 HTTPS 下载。

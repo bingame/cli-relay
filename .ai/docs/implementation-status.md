@@ -1,6 +1,24 @@
 # 实现与验收记录
 
-日期：2026-09-17；最近更新：2026-09-22。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+日期：2026-09-17；最近更新：2026-11-10。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
+
+## 2026-11-10：v0.1.6 发布验证（Spec v0.15）
+
+- 发布范围：包含此前未推送的 Claude 全局认证冲突与 Windows 回调引号修复、`relay notify` 远程通知，以及本次 Codex 适配更新。普通 CLI 使用独立 `CODEX_HOME`，共享原生会话、SQLite 和 Skills；模型与推理档位按供应商保存。新增 `--runtime app-server` 与包装模式的独立供应商参数，修复残缺托管标记阻断切换的问题。契约及上游差异详见 `relay-spec.md` 与 `internal/adapter/codex/NOTES.md`。
+- Windows 本地执行 `go test ./...`、`go vet ./...`、`go build -trimpath -o bin/relay.exe ./cmd/relay`，退出码均为 0。
+- `python -X utf8 scripts/test_installers.py --binary bin/relay.exe`、`python -X utf8 scripts/test_uninstallers.py`、`python -X utf8 scripts/test_installers.py --binary bin/relay.exe --powershell pwsh` 均退出 0。当前进程无创建符号链接权限，安装器相应测试按脚本规则跳过；其余安装、升级、补全、校验失败保护、卸载和数据保留检查通过。
+- 设置 `RELAY_CODEX_INTEGRATION=1` 后执行 `go test ./internal/adapter/codex -run '^TestLocalCodex' -v -count=1`，退出 0：旧 `custom=false` 保存失败对照成立，新 callback/env_key 配置可保存并在重启后保留模型偏好，跨供应商 `thread/resume` 与 `exec resume` 成功。
+- `python -X utf8 scripts/verify_codex_relay.py --relay bin/relay.exe` 退出 0：`relay exec`、app-server callback/env_key 渲染与 wrapper 完成回合，鉴权、RPC 模型覆盖、推理等级、历史回读及主配置/profile 不变检查通过。
+- 上述测试仅使用虚构凭据、自动清理的隔离目录和 127.0.0.1 假服务，不修改真实 Claude Code/Codex/Multica 配置。临时测试目录由测试框架回收；`bin/relay.exe` 保留供本次验证复核且已由 Git 忽略，本地 `.zcode/` 会话计划不纳入发布。
+- 发布分支 `codex/release-v0.1.6` 的代码提交 `a1822da` 已通过 [三系统 CI、Linux race 与五平台打包验证](https://github.com/bingame/cli-relay/actions/runs/42794604176)，所有任务成功。`v0.1.6` 标签指向只补充发布记录的 `56f5cbd`，标签工作流再次运行同一套验证后生成 Release 和安装附件。实际结果以 [Release](https://github.com/bingame/cli-relay/releases/tag/v0.1.6) 及其 GitHub Actions 为准。
+- 用户明确要求个人项目无需手动批准 PR，已将 `master` 的必需人工审批数设为 0，并启用仓库自动合并；新增必需的三系统测试和 `packages` 四项 GitHub Actions 检查，要求分支与主线同步。保留管理员约束、禁止强推/删除与会话解决要求。[PR #2](https://github.com/bingame/cli-relay/pull/2) 使用 CI 通过后自动合并的流程，后续发布沿用 `distribution/NOTES.md` 中的约定。
+
+## 2026-10-09：修复 Claude 全局 settings 的认证冲突警告
+
+- 现象：执行 `relay switch` 后直接启动原生 `claude`，出现 `Both ANTHROPIC_AUTH_TOKEN and apiKeyHelper set` 警告。
+- 根因：`ApplyGlobal` 只清除 `.relay-managed.json` 记录的旧字段；旧版 Relay、cc-switch 或手工配置留下的 `settings.json` `env.ANTHROPIC_AUTH_TOKEN` / `env.ANTHROPIC_API_KEY` 不在管理记录内，因此会与新版写入的 `apiKeyHelper` 同时保留。
+- 修正：全局合并时显式删除 `env` 中的两项 Claude 凭据环境变量；Relay 托管字段改为切换时覆盖，仍保留未托管用户字段。渲染产物和受控启动的凭据清理逻辑保持不变。
+- 测试：新增继承凭据变量清理回归测试；`go test ./internal/adapter/claudecode ./internal/cli ./internal/process` 通过。测试使用虚构凭据与临时目录，不修改真实 Claude 配置。
 
 ## 2026-09-22：模型目录只承载真实声明，两侧对齐（Spec v0.10）
 
@@ -61,12 +79,13 @@ GitHub Actions 首轮已通过 Linux（含 race）、macOS 原生测试及五平
 | P1 | SQL 内存导入与快照加密、按 `(target,id)` 直接覆盖、dry-run；受监管执行、退出分类、会话记录、子进程树收尾 |
 | P2 | relay-handoff Skill、Markdown/YAML/JSON Schema 验证、活 agent 输出接收、continue 与硬约束重复强调 |
 | P3 | Codex 官方 thread/read 优先、无头 resume、容错 JSONL、可选总结供应商、来源凭据脱敏、降级标识 |
-| P4 | 仅独立接口预留；不含重试循环、通知发送或关机 |
+| P4 | 通知子命令组 `relay notify`（2026-10-26）：webhook/Bark/Telegram/ntfy 适配器、通道令牌封存密钥库、三家 CLI 用户级 hook 安装/卸载（Codex 链式接管）、事件去重与静默 hook 入口；重试循环与关机仍仅接口预留 |
 | P5 | render-args / render-env JSON 对接；二进制别名包装；Codex 的 Multica 风格双向 stdio 完整本地验证 |
 
 ## 已运行检查
 
 - Windows：`go test ./...`、`go vet ./...`。
+- relay notify（2026-10-26，Windows）：`go test ./...` 全绿（适配器 httptest 断言请求形态、三家 install/uninstall 与伪造"orca 式"已有 hooks 共存/幂等/精确移除、Codex 链式接管与还原、通道加密往返与错误密钥拒绝、去重窗口、CLI 端到端含密钥库锁定时 hook 静默）；真实二进制隔离目录冒烟：set/install/status/hook（无输出、退出 0、失败仅记 notify.log）/uninstall 后三个原生配置文件恢复原状，通道文件无令牌明文。
 - 真实 SQL 完整 CLI 验证：18 条供应商、15 条支持的 target 渲染，61 条加密秘密数据、1 份加密 MCP/prompts 快照；dry-run 无写入，导入不自动 switch，输出及落盘文件未发现已识别凭据明文。
 - 2026-09-20 用用户 2026-09-19 生成的新导出（14 条供应商、18 列）复验：`TestParseRealDumpStatistics`、`TestRealDumpAdapterIntegration`（期望值改为从 dump 现场推导，不再硬编码上次的 15）；CLI 端到端（隔离 RELAY_HOME）覆盖 dry-run 报告 schema、按 `(target,id)` 直接覆盖（含 manual 记录）、`--on-conflict skip`、空导出 `--prune` 后 disabled 记录 `switch` 报"已被 cc-switch 同步标记为失效"、manual 记录不受清理影响；数据目录扫描未发现明文凭据。
 - 适配器真实 Codex + 127.0.0.1 假 SSE：override、独立 profile、switch 后默认配置三种路径。

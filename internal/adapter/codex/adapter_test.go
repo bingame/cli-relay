@@ -36,6 +36,20 @@ func decodeTOML(t *testing.T, data []byte) map[string]any {
 	return result
 }
 
+func checkLaunchArgs(t *testing.T, input adapter.LaunchInputs, artifact adapter.Artifact) {
+	t.Helper()
+	if len(input.Args) != 0 || input.Env["CODEX_HOME"] == "" || input.Env["CODEX_SQLITE_HOME"] == "" {
+		t.Fatalf("未返回隔离配置目录与共享 SQLite 目录: %q", input.Args)
+	}
+	data, err := os.ReadFile(filepath.Join(input.Env["CODEX_HOME"], "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decodeTOML(t, data)["model_providers"], decodeTOML(t, artifact.Content)["model_providers"]) {
+		t.Fatal("隔离配置与供应商定义不一致")
+	}
+}
+
 func TestRenderAndLaunchWithoutGlobalConfig(t *testing.T) {
 	a := New()
 	a.NativeHome = filepath.Join(t.TempDir(), "does-not-exist")
@@ -44,7 +58,7 @@ func TestRenderAndLaunchWithoutGlobalConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if input.Binary != "codex" || input.Env[artifact.EnvKey] != "" || input.Env["EXTRA_TOKEN"] != "fake-extra-key" || len(input.Env) != 1 {
+	if input.Binary != "codex" || input.Env[artifact.EnvKey] != "" || input.Env["EXTRA_TOKEN"] != "fake-extra-key" || len(input.Env) != 3 {
 		t.Fatal("回调主凭据或附加环境处理错误")
 	}
 	if !reflect.DeepEqual(input.UnsetEnv, []string{artifact.EnvKey}) {
@@ -60,20 +74,64 @@ func TestRenderAndLaunchWithoutGlobalConfig(t *testing.T) {
 		t.Fatalf("渲染文件不匹配: %v", err)
 	}
 	config := decodeTOML(t, artifact.Content)
-	id, _ := names(artifact.ProviderID)
-	if artifact.Profile["model_provider"] != id || artifact.Profile["model"] != "test-model" || config["model_provider"] != nil || config["model"] != nil {
+	nativeID, _ := names(artifact.ProviderID)
+	if artifact.Profile["model_provider"] != nativeID || artifact.Profile["model"] != "test-model" || config["model_provider"] != nil || config["model"] != nil {
 		t.Fatal("provider 注册表与 profile 选择器未分离")
 	}
-	if !reflect.DeepEqual(input.Args, []string{"--profile", id}) {
-		t.Fatal("未使用独立 profile")
+	checkLaunchArgs(t, input, artifact)
+	profile, err := os.ReadFile(filepath.Join(input.Env["CODEX_HOME"], "config.toml"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	profile, err := os.ReadFile(filepath.Join(a.NativeHome, id+".config.toml"))
-	if err != nil || bytes.Contains(profile, []byte("model_providers")) {
-		t.Fatal("profile 不应重复供应商注册表")
+	if decodeTOML(t, profile)["model_providers"].(map[string]any)[nativeID] == nil {
+		t.Fatal("隔离配置缺少完整供应商表")
 	}
-	global, err := os.ReadFile(filepath.Join(a.NativeHome, "config.toml"))
-	if err != nil || !bytes.Contains(global, []byte("[model_providers."+id+"]")) {
-		t.Fatal("启动前未注册供应商")
+	if _, err := os.Stat(filepath.Join(a.NativeHome, "config.toml")); !os.IsNotExist(err) {
+		t.Fatal("临时启动不应创建或修改主配置")
+	}
+}
+
+func TestAppServerLaunchWithoutProfiles(t *testing.T) {
+	for _, secretMode := range []string{"callback", "env_key"} {
+		t.Run(secretMode, func(t *testing.T) {
+			a := New()
+			a.NativeHome = filepath.Join(t.TempDir(), "untouched")
+			p := sampleProvider()
+			p.SecretMode = secretMode
+			p.Extra = map[string]any{"codex_config": map[string]any{"model_reasoning_effort": "xhigh"}}
+			artifact := renderTest(t, a, p)
+			inputs, err := a.BuildAppServerInputs(artifact, adapter.ResolvedSecrets{"api_key": "fake-app-server-key"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := map[string]any{}
+			for i := 0; i < len(inputs.Args); i += 2 {
+				if inputs.Args[i] != "-c" || i+1 >= len(inputs.Args) {
+					t.Fatalf("app-server 参数必须仅包含 -c 覆盖: %q", inputs.Args)
+				}
+				for key, value := range decodeTOML(t, []byte(inputs.Args[i+1])) {
+					config[key] = value
+				}
+			}
+			id := "relay_" + p.ID
+			if config["model_provider"] != id || config["model"] != p.Model || config["model_reasoning_effort"] != "xhigh" {
+				t.Fatal("app-server 未渲染供应商选择器或模型设置", config)
+			}
+			defs := config["model_providers"].(map[string]any)
+			definition := decodeTOML(t, artifact.Content)["model_providers"].(map[string]any)[nativeProviderID]
+			if len(defs) != 1 || !reflect.DeepEqual(defs[id], definition) {
+				t.Fatal("app-server 未使用独立命名空间中的完整供应商表")
+			}
+			if strings.Contains(strings.Join(inputs.Args, " "), "fake-app-server-key") {
+				t.Fatal("app-server 参数泄露凭据")
+			}
+			if (inputs.Env[artifact.EnvKey] != "") != (secretMode == "env_key") {
+				t.Fatal("app-server 凭据模式处理错误")
+			}
+			if _, err := os.Stat(a.NativeHome); !os.IsNotExist(err) {
+				t.Fatal("app-server 渲染不应创建原生配置或 profile")
+			}
+		})
 	}
 }
 
@@ -90,8 +148,8 @@ func TestNativeConfigMappingAndCredentialRejection(t *testing.T) {
 	a.NativeHome = t.TempDir()
 	artifact := renderTest(t, a, p)
 	config := decodeTOML(t, artifact.Content)
-	id, _ := names(p.ID)
-	def := config["model_providers"].(map[string]any)[id].(map[string]any)
+	nativeID, _ := names(p.ID)
+	def := config["model_providers"].(map[string]any)[nativeID].(map[string]any)
 	if artifact.Profile["model"] != p.Model || artifact.Profile["model_reasoning_effort"] != "high" || def["base_url"] != p.BaseURL || def["auth"] == nil || def["request_max_retries"] != int64(3) {
 		t.Fatal("原生字段映射错误")
 	}
@@ -102,9 +160,7 @@ func TestNativeConfigMappingAndCredentialRejection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(input.Args, []string{"--profile", id}) {
-		t.Fatal("未使用独立 profile")
-	}
+	checkLaunchArgs(t, input, artifact)
 	for _, field := range []string{"api_key", "experimental_bearer_token", "http_headers", "auth", "OPENAI_API_KEY", "access_token", "clientSecret", "accessToken", "cookie"} {
 		t.Run(field, func(t *testing.T) {
 			bad := sampleProvider()
@@ -125,8 +181,8 @@ func TestCallbackBindsRelayHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := decodeTOML(t, artifact.Content)
-	id, _ := names(artifact.ProviderID)
-	def := config["model_providers"].(map[string]any)[id].(map[string]any)
+	nativeID, _ := names(artifact.ProviderID)
+	def := config["model_providers"].(map[string]any)[nativeID].(map[string]any)
 	auth, ok := def["auth"].(map[string]any)
 	if !ok || auth["command"] != "relay" {
 		t.Fatalf("回调配置缺失: %#v", def["auth"])
@@ -143,14 +199,75 @@ func TestCallbackBindsRelayHome(t *testing.T) {
 	}
 }
 
-func TestNamesDoNotCollide(t *testing.T) {
-	seenNames, seenEnv := map[string]bool{}, map[string]bool{}
+func TestNativeNameSharedAndEnvironmentNamesDoNotCollide(t *testing.T) {
+	seenEnv := map[string]bool{}
 	for _, id := range []string{"a-b", "a_b", "A_B", "A-b"} {
 		name, env := names(id)
-		if seenNames[name] || seenEnv[env] || !envName.MatchString(env) {
-			t.Fatal("供应商名称或环境变量撞名")
+		if name != nativeProviderID || seenEnv[env] || !envName.MatchString(env) {
+			t.Fatal("原生供应商名称未共享 custom，或环境变量撞名")
 		}
-		seenNames[name], seenEnv[env] = true, true
+		seenEnv[env] = true
+	}
+}
+
+func TestTemporaryProvidersKeepSeparateProfilesAndCredentials(t *testing.T) {
+	a := New()
+	a.NativeHome = t.TempDir()
+	original := []byte("model_provider='custom'\n[model_providers.custom]\nname='cc-switch'\nenv_key='OLD_KEY'\n")
+	path := filepath.Join(a.NativeHome, "config.toml")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	homes := map[string]string{}
+	for _, id := range []string{"first", "second"} {
+		p := sampleProvider()
+		p.ID, p.Model, p.SecretMode = id, id+"-model", "env_key"
+		artifact := renderTest(t, a, p)
+		input, err := a.BuildLaunchInputs(artifact, adapter.ResolvedSecrets{"api_key": "fake-" + id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkLaunchArgs(t, input, artifact)
+		homes[id] = input.Env["CODEX_HOME"]
+		if len(input.Env) != 3 || input.Env[artifact.EnvKey] != "fake-"+id {
+			t.Fatal("供应商凭据未隔离")
+		}
+	}
+	for _, id := range []string{"first", "second"} {
+		data, err := os.ReadFile(filepath.Join(homes[id], "config.toml"))
+		if err != nil || decodeTOML(t, data)["model"] != id+"-model" {
+			t.Fatal("独立 profile 被其他供应商覆盖")
+		}
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatal("临时运行修改了主配置")
+	}
+}
+
+func TestReplaceCustomPreservesScatteredTablesAndComments(t *testing.T) {
+	a := New()
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	original := "notes='''\n[model_providers.custom]\n虚构表头\n'''\n[model_providers.'custom'] # 保留表头注释\nname='old' # 保留字段注释\n[model_providers.other]\nname='keep'\n[model_providers.\"custom\".auth] # 保留子表注释\ncommand='old-command'\n[projects.'E:/work']\ntrust_level='trusted'\n[model_providers.custom.query_params]\nversion='old-version'\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyGlobal(renderTest(t, a, sampleProvider()), home); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kept := range []string{"# 保留表头注释", "# 保留字段注释", "# 保留子表注释", "[model_providers.other]\nname='keep'", "notes='''\n[model_providers.custom]\n虚构表头\n'''", "[projects.'E:/work']\ntrust_level='trusted'"} {
+		if !bytes.Contains(data, []byte(kept)) {
+			t.Fatalf("丢失无关内容：%s", kept)
+		}
+	}
+	custom := decodeTOML(t, data)["model_providers"].(map[string]any)[nativeProviderID].(map[string]any)
+	if custom["query_params"] != nil || custom["auth"].(map[string]any)["command"] != "relay" {
+		t.Fatal("旧供应商分散子表仍然残留")
 	}
 }
 
@@ -171,8 +288,8 @@ func TestJSONStoredIntegerConfigRemainsNativeInteger(t *testing.T) {
 	a := New()
 	artifact := renderTest(t, a, fromStore)
 	config := decodeTOML(t, artifact.Content)
-	id, _ := names(p.ID)
-	definition := config["model_providers"].(map[string]any)[id].(map[string]any)
+	nativeID, _ := names(p.ID)
+	definition := config["model_providers"].(map[string]any)[nativeID].(map[string]any)
 	if artifact.Profile["model_context_window"] != int64(200000) || artifact.Profile["model_auto_compact_token_limit"] != int64(180000) || definition["request_max_retries"] != int64(3) || definition["stream_idle_timeout_ms"] != int64(120000) {
 		t.Fatal("JSON往返后配置整数退化成TOML浮点数")
 	}
@@ -200,7 +317,7 @@ func TestApplyGlobalPreservesUserConfigAndProfiles(t *testing.T) {
 	artifact := renderTest(t, a, p)
 	home := t.TempDir()
 	path := filepath.Join(home, "config.toml")
-	original := "# 用户注释\nprofile = 'old-manual' # 保留旧默认的说明\nmodel = \"user-model\" # 保留同行说明\nmodel_provider = 'user'\nnotes = '''保留多行\n# BEGIN RELAY CODEX not-real\n结束'''\n\n[model_providers.user]\nname = 'user' # 保留供应商\nbase_url = 'https://user.invalid'\n\n[projects.'C:/work']\ntrust_level = 'trusted'\n\n[profiles.historical]\nmodel = 'historical-model'\n"
+	original := "# 用户注释\nprofile = 'old-manual' # 保留旧默认的说明\nmodel = \"user-model\" # 保留同行说明\nmodel_provider = 'custom'\nnotes = '''保留多行\n# BEGIN RELAY CODEX not-real\n结束'''\n\n[model_providers.user]\nname = 'user' # 保留供应商\nbase_url = 'https://user.invalid'\n\n# cc-switch 当前活动槽\n[model_providers.custom]\nname = 'cc-switch-old'\nbase_url = 'https://old.example.invalid/v1'\nwire_api = 'responses'\nenv_key = 'OLD_CC_SWITCH_KEY'\n\n[projects.'C:/work']\ntrust_level = 'trusted'\n\n[profiles.historical]\nmodel = 'historical-model'\n"
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +331,13 @@ func TestApplyGlobalPreservesUserConfigAndProfiles(t *testing.T) {
 		}
 	}
 	config := decodeTOML(t, first)
-	id, _ := names(p.ID)
-	if config["model"] != p.Model || config["model_provider"] != id || config["profile"] != nil {
+	nativeID, _ := names(p.ID)
+	if config["model"] != p.Model || config["model_provider"] != nativeID || config["profile"] != nil {
 		t.Fatal("全局指针错误")
+	}
+	active := config["model_providers"].(map[string]any)[nativeID].(map[string]any)
+	if active["base_url"] != p.BaseURL || active["env_key"] != nil || active["auth"] == nil {
+		t.Fatal("未定点替换 cc-switch 的 custom 活动槽")
 	}
 	if err := a.ApplyGlobal(artifact, home); err != nil {
 		t.Fatal(err)
@@ -232,15 +353,16 @@ func TestApplyGlobalPreservesUserConfigAndProfiles(t *testing.T) {
 	}
 	third, _ := os.ReadFile(path)
 	config = decodeTOML(t, third)
-	if len(config["model_providers"].(map[string]any)) != 3 {
+	if len(config["model_providers"].(map[string]any)) != 2 {
 		t.Fatal("切换时丢失其他已安装 provider")
 	}
 	a.LaunchMode = "profile"
 	input, err := a.BuildLaunchInputs(artifact, nil)
-	if err != nil || !reflect.DeepEqual(input.Args, []string{"--profile", id}) {
+	if err != nil {
 		t.Fatalf("独立 profile 未安装: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(home, id+".config.toml"), []byte("model='user-edited'\n"), 0600); err != nil {
+	checkLaunchArgs(t, input, artifact)
+	if err := os.WriteFile(filepath.Join(input.Env["CODEX_HOME"], "config.toml"), []byte("model=???\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.BuildLaunchInputs(artifact, nil); err == nil {
@@ -270,7 +392,7 @@ func TestApplyGlobalIncludesCatalogForDirectCodexLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := decodeTOML(t, data)
-	if config["model_provider"] != p.ID || config["model"] != p.Model {
+	if config["model_provider"] != nativeProviderID || config["model"] != p.Model {
 		t.Fatalf("全局 Codex 选择器错误: %#v", config)
 	}
 	catalogPath, ok := config["model_catalog_json"].(string)
@@ -305,17 +427,12 @@ func TestProfileModeInstallsWithoutChangingDefault(t *testing.T) {
 	if _, err := a.BuildLaunchInputs(artifact, nil); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(a.NativeHome, "config.toml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	config := decodeTOML(t, data)
-	if config["model_provider"] != nil || config["model"] != nil {
-		t.Fatal("临时启动修改了全局默认")
+	if _, err := os.Stat(filepath.Join(a.NativeHome, "config.toml")); !os.IsNotExist(err) {
+		t.Fatal("临时启动创建或修改了全局配置")
 	}
 }
 
-func TestProfileContainsOnlySelectorsAndCatalog(t *testing.T) {
+func TestProfileContainsSelectorsResetAndCatalog(t *testing.T) {
 	a := New()
 	a.NativeHome = t.TempDir()
 	p := sampleProvider()
@@ -324,14 +441,15 @@ func TestProfileContainsOnlySelectorsAndCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = a.BuildLaunchInputs(artifact, nil); err != nil {
-		t.Fatal(err)
-	}
-	profile, err := os.ReadFile(filepath.Join(a.NativeHome, p.ID+".config.toml"))
+	input, err := a.BuildLaunchInputs(artifact, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(profile, []byte("model_providers")) || !bytes.Contains(profile, []byte("model_catalog_json")) {
+	profile, err := os.ReadFile(filepath.Join(input.Env["CODEX_HOME"], "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodeTOML(t, profile)["model_providers"].(map[string]any)[nativeProviderID] == nil || !bytes.Contains(profile, []byte("model_catalog_json")) {
 		t.Fatal("profile 内容不符合 overlay 契约")
 	}
 	catalog, err := os.ReadFile(filepath.Join(filepath.Dir(artifact.Path), p.ID+".catalog.json"))
@@ -343,8 +461,8 @@ func TestProfileContainsOnlySelectorsAndCatalog(t *testing.T) {
 func TestApplyGlobalRejectsConflictsWithoutWriting(t *testing.T) {
 	a := New()
 	artifact := renderTest(t, a, sampleProvider())
-	id, _ := names(artifact.ProviderID)
-	for _, text := range []string{"model = ???", "[model_providers." + id + "]\nname='manual'\n", "# BEGIN RELAY CODEX " + id + "\nmodel='x'\n"} {
+	// 非标准表结构（如内联字符串）无法定点替换，必须拒绝而不是整份重写。
+	for _, text := range []string{"model = ???", "model_providers.custom = 'not-a-table'\n"} {
 		t.Run(text[:5], func(t *testing.T) {
 			home := t.TempDir()
 			path := filepath.Join(home, "config.toml")
@@ -361,7 +479,7 @@ func TestApplyGlobalRejectsConflictsWithoutWriting(t *testing.T) {
 		})
 	}
 	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, id+".config.toml"), []byte("model='manual'\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, artifact.ProviderID+".config.toml"), []byte("model='manual'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.ApplyGlobal(artifact, home); err == nil {
@@ -369,6 +487,103 @@ func TestApplyGlobalRejectsConflictsWithoutWriting(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, "config.toml")); !os.IsNotExist(err) {
 		t.Fatal("profile 冲突时不应创建 config.toml")
+	}
+}
+
+// cc-switch 整份重写 config.toml 时曾把成对标记拆散，只留下孤立的 END。
+// 这类残缺标记不得再阻断启动，也不能导致删除它周围的内容。
+func TestApplyGlobalToleratesBrokenMarkers(t *testing.T) {
+	a := New()
+	p := sampleProvider()
+	artifact := renderTest(t, a, p)
+	nativeID, _ := names(p.ID)
+	cases := map[string]string{
+		"孤立 END":   "[tui]\nx = 1\n# END RELAY CODEX " + nativeID + "\n\n[projects.'C:/w']\ntrust_level = 'trusted'\n",
+		"孤立 BEGIN": "# BEGIN RELAY CODEX " + nativeID + "\nmodel = 'x'\n\n[mcp_servers.node]\ncommand = 'node'\n",
+		"标记倒序":     "# END RELAY CODEX " + nativeID + "\n[projects.'C:/w']\ntrust_level = 'trusted'\n# BEGIN RELAY CODEX " + nativeID + "\n",
+		"重复配对":     "# BEGIN RELAY CODEX " + nativeID + "\n# END RELAY CODEX " + nativeID + "\n# END RELAY CODEX " + nativeID + "\n[projects.'C:/w']\ntrust_level = 'trusted'\n",
+	}
+	for name, original := range cases {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, "config.toml")
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.ApplyGlobal(artifact, home); err != nil {
+				t.Fatalf("残缺标记不应阻断写入: %v", err)
+			}
+			merged, _ := os.ReadFile(path)
+			// 用户内容必须完整保留，只有标记行被清理。
+			if name != "重复配对" && !bytes.Contains(merged, []byte("trust_level = 'trusted'")) && !bytes.Contains(merged, []byte("[mcp_servers.node]")) {
+				t.Fatalf("误删了用户内容: %s", merged)
+			}
+			if bytes.Count(merged, []byte("# BEGIN RELAY CODEX ")) != 1 || bytes.Count(merged, []byte("# END RELAY CODEX ")) != 1 {
+				t.Fatalf("未清理残缺标记: %s", merged)
+			}
+			config := decodeTOML(t, merged)
+			if config["model_provider"] != nativeID {
+				t.Fatal("未写入全局指针")
+			}
+			if _, ok := config["model_providers"].(map[string]any)[nativeID]; !ok {
+				t.Fatal("未写入活动槽")
+			}
+		})
+	}
+}
+
+// 标记行只清理自身；表内容由 removeProviderTable 按结构删除，注释错位不会误删配置。
+func TestRemoveManagedMarkersOnlyRemovesMarkers(t *testing.T) {
+	nativeID, _ := names("test-provider")
+	content := []byte("# 用户注释\nkeep = 1\n\n# BEGIN RELAY CODEX " + nativeID + "\nmodel_providers.custom = { base_url = 'https://old.invalid' }\n# END RELAY CODEX " + nativeID + "\n\n[projects.'C:/w']\ntrust_level = 'trusted'\n")
+	result, err := removeManagedMarkers(content, nativeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(result, []byte("RELAY CODEX")) {
+		t.Fatalf("未清理标记行: %s", result)
+	}
+	// 标记不再决定删除范围，表内容的取舍交给结构化移除。
+	for _, keep := range []string{"# 用户注释", "keep = 1", "old.invalid", "[projects.'C:/w']"} {
+		if !bytes.Contains(result, []byte(keep)) {
+			t.Fatalf("误删内容 %s: %s", keep, result)
+		}
+	}
+	// 其他 id 的标记与字符串中的相同文字都不受影响。
+	other := []byte("# END RELAY CODEX another-provider\nnotes = '''\n# BEGIN RELAY CODEX " + nativeID + "\n'''\n")
+	result, err = removeManagedMarkers(other, nativeID)
+	if err != nil || !bytes.Equal(result, other) {
+		t.Fatalf("不应改动其他 id 的标记或多行字符串: %v %s", err, result)
+	}
+	// 旧版按供应商 ID 命名的标记也必须一并清理，否则切换后仍会残留。
+	legacy := []byte("# BEGIN RELAY CODEX axonhub-lite\nx = 1\n# END RELAY CODEX axonhub-lite\n# END RELAY CODEX axonhub-lite\n")
+	result, err = removeManagedMarkers(legacy, nativeID, "axonhub-lite")
+	if err != nil || bytes.Contains(result, []byte("RELAY CODEX")) || !bytes.Contains(result, []byte("x = 1")) {
+		t.Fatalf("未清理旧版命名标记: %v %s", err, result)
+	}
+}
+
+// cc-switch 重排注释后，标记可能包住别的供应商表；结构化移除不能因此带走它。
+func TestApplyGlobalDoesNotDeleteBehindMisplacedMarkers(t *testing.T) {
+	a := New()
+	artifact := renderTest(t, a, sampleProvider())
+	nativeID, _ := names(sampleProvider().ID)
+	original := "# BEGIN RELAY CODEX " + nativeID + "\n\n[model_providers.other]\nname = 'other'\nbase_url = 'https://other.invalid'\n# END RELAY CODEX " + nativeID + "\n"
+	home := t.TempDir()
+	path := filepath.Join(home, "config.toml")
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyGlobal(artifact, home); err != nil {
+		t.Fatal(err)
+	}
+	merged, _ := os.ReadFile(path)
+	if !bytes.Contains(merged, []byte("[model_providers.other]")) {
+		t.Fatalf("误删了被标记包住的其他供应商: %s", merged)
+	}
+	config := decodeTOML(t, merged)
+	if _, ok := config["model_providers"].(map[string]any)["other"]; !ok {
+		t.Fatal("其他供应商表丢失")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,6 +75,23 @@ func TestRenderLaunchUsesAPIKeyHelper(t *testing.T) {
 		if !found {
 			t.Errorf("未清除继承变量 %s", expected)
 		}
+	}
+}
+
+func TestHelperQuoteWindowsPath(t *testing.T) {
+	// 回归: Windows 下 apiKeyHelper 由 cmd 解析，POSIX 单引号会被当作路径
+	// 字面量，导致 relay 收到 'C:\Users\... 并拼出非法路径（CreateFile 语法错误）。
+	if runtime.GOOS == "windows" {
+		if q := helperQuote(`C:\Users\libin\.relay`); q != `C:\Users\libin\.relay` {
+			t.Fatalf("Windows 无空格路径不应加单引号: %q", q)
+		}
+		if q := helperQuote(`C:\Program Files\relay`); q != `"C:\Program Files\relay"` {
+			t.Fatalf("Windows 含空格路径应使用双引号: %q", q)
+		}
+		return
+	}
+	if q := helperQuote("/home/user/.relay"); q != "'/home/user/.relay'" {
+		t.Fatalf("POSIX 路径应使用单引号: %q", q)
 	}
 }
 
@@ -278,7 +296,7 @@ func TestApplyGlobalPreservesUnrelatedAndCleansPriorProvider(t *testing.T) {
 	}
 }
 
-func TestApplyGlobalProtectsManualEdits(t *testing.T) {
+func TestApplyGlobalOverridesManagedFieldModifiedByUser(t *testing.T) {
 	a := New()
 	home := t.TempDir()
 	root := t.TempDir()
@@ -293,7 +311,6 @@ func TestApplyGlobalProtectsManualEdits(t *testing.T) {
 	settings := readSettings(t, home)
 	settings["model"] = "manual-model"
 	writeSettings(t, home, settings)
-	before, _ := os.ReadFile(filepath.Join(home, "settings.json"))
 	p.ID = "second"
 	p.Model = "second-model"
 	p.Extra = nil
@@ -301,16 +318,17 @@ func TestApplyGlobalProtectsManualEdits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.ApplyGlobal(next, home); err == nil {
-		t.Fatal("应报告手工修改冲突")
+	// 用户修改了 relay 托管的字段后切换供应商，应成功覆盖
+	if err := a.ApplyGlobal(next, home); err != nil {
+		t.Fatal("切换供应商应覆盖 relay 管理范围内被用户修改的字段", err)
 	}
-	after, _ := os.ReadFile(filepath.Join(home, "settings.json"))
-	if string(before) != string(after) {
-		t.Fatal("冲突时修改了配置")
+	settings = readSettings(t, home)
+	if settings["model"] != "second-model" {
+		t.Fatalf("应覆盖为新供应商的模型，实际值: %v", settings["model"])
 	}
 }
 
-func TestApplyGlobalPreservesModifiedObsoleteField(t *testing.T) {
+func TestApplyGlobalCleansModifiedObsoleteField(t *testing.T) {
 	a := New()
 	home := t.TempDir()
 	root := t.TempDir()
@@ -335,8 +353,39 @@ func TestApplyGlobalPreservesModifiedObsoleteField(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings = readSettings(t, home)
-	if settings["env"].(map[string]any)["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "user-changed-model" {
-		t.Fatal("删除了用户修改的旧字段")
+	// 旧供应商托管的字段应被清理，即使用户修改过
+	if _, ok := settings["env"].(map[string]any)["ANTHROPIC_DEFAULT_HAIKU_MODEL"]; ok {
+		t.Fatal("应清理旧供应商的托管字段")
+	}
+}
+
+func TestApplyGlobalRemovesInheritedCredentialEnv(t *testing.T) {
+	a := New()
+	home := t.TempDir()
+	writeSettings(t, home, map[string]any{
+		"theme": "dark",
+		"env": map[string]any{
+			"ANTHROPIC_AUTH_TOKEN": "fake-auth-token",
+			"ANTHROPIC_API_KEY":    "fake-api-key",
+			"USER_CUSTOM":          "retained",
+		},
+	})
+	artifact, err := a.Render(fixtureProvider(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ApplyGlobal(artifact, home); err != nil {
+		t.Fatal(err)
+	}
+	settings := readSettings(t, home)
+	env := settings["env"].(map[string]any)
+	for _, key := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
+		if _, ok := env[key]; ok {
+			t.Fatalf("全局 settings 残留 %s，会与 apiKeyHelper 冲突", key)
+		}
+	}
+	if settings["theme"] != "dark" || env["USER_CUSTOM"] != "retained" || settings["apiKeyHelper"] == "" {
+		t.Fatal("清理冲突凭据时未保留无关设置或 apiKeyHelper")
 	}
 }
 
