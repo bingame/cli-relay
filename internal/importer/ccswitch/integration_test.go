@@ -77,8 +77,8 @@ func checkAdapterIntegration(t *testing.T, result *Result) int {
 		for _, target := range []string{entry.Provider.Target} {
 			ad, supported := adapters[target]
 			if !supported {
-				if entry.Secrets["source_settings"] == "" {
-					t.Fatalf("第 %d 条未知目标缺少加密用源配置", index+1)
+				if entry.Secrets["source_settings"] != "" {
+					t.Fatalf("第 %d 条未知目标不应保留源配置", index+1)
 				}
 				continue
 			}

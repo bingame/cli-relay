@@ -1,4 +1,6 @@
-# Relay 技术规格说明书 v0.15
+# Relay 技术规格说明书 v0.16
+
+> **v0.16 变更（仅导入模型供应商）**：cc-switch 导入只保存供应商身份、连接参数、模型配置和必要凭据。Claude `env` 改为供应商变量白名单；Codex 仅保留所选供应商定义和模型字段。`projects`、hooks、MCP、Skills、插件、权限、本地目录、原始 settings/meta 及 MCP/prompts 快照均不保存。每次正式导入还清理所有历史 `cc-switch-import` 记录中的非供应商数据和历史导入快照，包括跳过、失效和本次未出现的记录；保留其供应商值、凭据、模型目录及状态，并更新相关渲染产物。`--dry-run` 只报告清理计划；不修改原生 CLI 的本地配置。
 
 > **v0.15 变更（Codex 模型保存修复）**：普通 CLI 不再生成 `custom=false` 中间层。按 Relay 数据目录和供应商隔离 `CODEX_HOME`，配置内完整定义 `custom`，共享原生会话/SQLite/Skills/插件/规则，继承非供应商设置与 MCP。模型、推理档位按供应商保存；主配置不变。外部普通 CLI 启动器必须同时消费 render-args/render-env。app-server 集成路径不变。
 
@@ -163,7 +165,7 @@ CREATE TABLE import_log (
     file_hash     TEXT,
     imported_at   TEXT,
     seen_provider_ids TEXT,              -- 本次导出快照里出现的 provider id 列表(JSON数组), 供 §6 失效检测比对
-    raw_snapshot  TEXT                   -- 原始 mcp_servers/prompts 表内容，先存起来不解析
+    raw_snapshot  BLOB                   -- 历史兼容列；新导入恒为 NULL，并清空旧快照
 );
 ```
 
@@ -399,23 +401,23 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
    - 在第 2 步重建出的临时数据库上执行 `PRAGMA table_info(providers)`，按返回的列名、类型、默认值和主键信息现场探测。SQL dump 自带建表语句时，优先以这个临时库的实际结果兼容不同导出版本。
 
    不得复制或猜测本 spec 早期草稿里出现过的任何 `providers` 列名和列顺序，也不得把曾经出现过的示例 `SELECT` 当作兼容性承诺。查询必须使用显式列名，并由已确认的 schema 映射构造，禁止 `SELECT *` 后按位置取值。若找不到导入所需的语义字段，应安全失败，并在不泄露字段值的前提下报告 schema 版本（若有）和探测到的列名，供人工确认。
-4. 对每一行，**按白名单只提取"用户级"语义字段**，Codex 的 `shell_environment_policy`/`sandbox_mode`/`approval_policy`、Claude Code 的 `permissions`/`hooks` 等运行环境配置一律不导入，它们属于 Relay 全局配置的范畴，不随 provider 走。以下描述的是要提取的**语义**，不是对 cc-switch 物理列名或 JSON 键名的固定声明；实际取值路径必须来自第 3 步的源码核对或现场探测：
-   - provider 所属应用类型 → 映射到 Relay 的 `target`（`claude` → `claude`，`codex` → `codex`，`gemini` 等未支持的 target 先原样记录、不生成 Adapter 产物，避免静默丢数据）。
+4. 对每一行，**按白名单只提取模型供应商语义字段**。`projects`、hooks、MCP、Skills、插件、权限、命令和本地目录等运行环境配置一律不导入，也不以加密原始快照保留。Claude 的 `env` 只保留明确支持的供应商认证、地址、模型映射和请求参数；Codex 只保留 `model_provider` 选中的定义及模型字段，外部模型目录路径不导入，模型映射由 Relay 重新渲染。按字段语义过滤，不以字符串包含斜杠判断路径，避免误删代理 URL 或 `组织/模型`。以下描述的是要提取的**语义**，不是对 cc-switch 物理列名或 JSON 键名的固定声明；实际取值路径必须来自第 3 步的源码核对或现场探测：
+   - provider 所属应用类型 → 映射到 Relay 的 `target`（`claude` → `claude`，`codex` → `codex`，`gemini` 等未支持的 target 仅保留身份和已识别的通用供应商字段，不保留任意原始配置、不生成 Adapter 产物）。
    - provider 的设置载荷 → 按其实际格式反序列化，再提取基础 URL、API 密钥（→ `provider_secrets`，立刻加密，不落中间文件）、默认模型和模型目录等白名单语义；模型目录写入 `provider_models` 表，不塞进 `extra_json`（见 §3.1 变更）。载荷内部键名同样以所支持 cc-switch 版本的实际源码/数据为准，不沿用早期草稿中的名称猜测。
    - **模型目录只承载源里真实声明的「模型映射」**（Codex 侧是 `settings_config.modelCatalog` 的非空 `models` 数组；Claude Code 侧是其原生模型声明字段）。源里没有声明就必须**一条 `provider_models` 记录都不写入**——`provider.Model`（默认模型）不是模型目录，不得用它伪造记录，否则下游 Adapter 会因"目录非空"而渲染出 `model_catalog_json`/`modelPicker`，把"任意模型"渠道锁死（见 §5.2 gating）。逐条导入的字段限于显示名、模型 ID、上下文窗口、思考档位与默认档位；模型 ID 与显示名需按 cc-switch 的行为做 trim 后去重、跳过空值，默认档位取自源里的默认模型标记。
    - **匹配键与覆盖策略**：`display_name` 直接取 cc-switch 的供应商名称（不改名）。**匹配与覆盖只按 `(target, id)` 进行**——本地已存在相同 `(target, id)`（无论 `source` 是 `manual` 还是 `cc-switch-import`）时，导入记录直接整体覆盖它；同一 CLI 内若既有记录与本条显示名称相同但 ID 不同，同样视为被覆盖（因为 `UNIQUE(target, display_name)` 不允许两者共存，cc-switch 也只在同一 CLI 内约束名称唯一）。这是刻意与 cc-switch 保持一致的"直接覆盖"语义：不生成数字后缀改名，不区分 `manual` 记录。命中后按 `--on-conflict` 参数处理：
      - `overwrite`（默认）：用白名单字段的新值整体覆盖已有记录（因为白名单本来就限定了范围，不存在"覆盖到 Relay 自己管理的其他字段"的风险）。
-     - `skip`：本地已存在则跳过，不覆盖，仅在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）。**跳过的匹配键与存储层一致**：`(target, id)` 或 `(target, display_name)` 任一命中即视为冲突，避免同名不同 ID 的旧记录被静默替换。
+     - `skip`：本地已存在则跳过供应商值的覆盖，在报告里提示被跳过的条目（报告字段 `skipped: true`，见下方报告 schema）；历史导入记录的非供应商数据仍按第 5 步清理。**跳过的匹配键与存储层一致**：`(target, id)` 或 `(target, display_name)` 任一命中即视为冲突，避免同名不同 ID 的旧记录被静默替换。
    - **slug 歧义拒绝**：`Slugify(display_name)` 不保证全局唯一——同一 CLI 下 "A B"/"A-B" 会归一化为同一 ID。批内或库内已存在同一 `(target, id)` 但显示名称不同时，直接拒绝写入（报告字段 `rejected: true` + `warnings`），不追加数字后缀，避免误合并。
    - **ID 名称**：Relay 的 provider `id` 由 `slugify(display_name)` 归一化而来（不再拼接 target，也不再追加 `-2/-3...` 数字后缀）；cc-switch 的原始 `id` 仅作为 `original_id` 保留在报告里供追溯，不作为 Relay 的匹配键。因此**没有 `conflict_renamed` 信号**。不同 CLI 之间允许出现同 ID、同显示名称，由 `(target, id)` 主键与 `UNIQUE(target, display_name)` 各自约束。
-5. `mcp_servers`/`prompts` 表原样存入 `import_log.raw_snapshot`，本版本不解析、不生成对应能力，为后续需要时保留原始数据；若这两张表里含凭据类内容需先加密再存（见 §10 安全要求第 4 条）。
+5. 忽略 `mcp_servers`、`prompts`、Skills 等非供应商表，不生成原始快照。正式导入用同一白名单清理所有已有 `source="cc-switch-import"` 记录的 `extra_json` 和不再需要的凭据（含 `source_settings`/`source_meta`、非供应商环境变量、任意 `field:*`），重算内容哈希并重新渲染；包括 `skip`、disabled 和本次未出现的记录。清空历史 `source="cc-switch"` 导入日志的 `raw_snapshot`，保留哈希、时间及已见供应商索引。无匹配覆盖的 manual 记录不清理，不编辑用户原生配置。
 6. **失效清理**：把本次导出快照里出现的所有 `(target, id)` 匹配键写入 `import_log.seen_provider_ids`。本地所有 `source = "cc-switch-import"` 且其 `(target, id)` 不在这个集合里的记录视为"cc-switch 里已经删掉，但 Relay 还留着"：
-   - 默认：只在导入报告里列出这些记录，不做任何改动。
+   - 默认：只在导入报告里列出这些记录，不改变其状态；第 5 步非供应商数据清理仍执行。
    - `--prune`：把它们的 `status` 置为 `disabled`（软删除，数据保留）；`switch`/`run` 引用到 `disabled` 的 provider 时报错并提示"已被 cc-switch 同步标记为失效"，而不是静默找不到。
    - 物理删除是单独的命令 `relay provider prune --hard`，只清理已经 `disabled` 的记录，不作为 import 流程的自动副作用。
    - **`source = "manual"` 的记录永远不受这套清理逻辑影响**，无论是否出现在 cc-switch 的导出快照里。
 7. 上游“当前激活”语义字段为真的行：仅在导入报告里提示"cc-switch 中原激活的 provider 是 X，是否要 `relay switch X`"，**不自动执行 switch**；其物理列名仍按第 3 步确认，不在本 spec 中固定。
-8. `--dry-run`：只做到第 4 步的解析结果展示，不写入 `providers.db`。
+8. `--dry-run`：展示解析结果和历史数据清理计划，不解锁凭据库、不写入数据库或渲染产物。
 
 **导入报告字段（`--dry-run` 与正式导入都输出同一结构）**：
 
@@ -427,6 +429,8 @@ Skill 内容通过 Go `embed` 编译进 Relay 二进制，与 Relay 版本严格
 | `count` | `providers` 中的报告条目数 |
 | `providers` | 本次导出快照中的 provider 报告数组，每条结构见下表 |
 | `stale_providers` | 本地存在、但本次导出快照未出现的 `cc-switch-import` provider 键数组（形如 `target/id`）；`manual` 记录不进入此数组 |
+| `cleaned_providers` | 需要清理历史非供应商数据的 provider 键数组；dry-run 为计划，正式导入为已执行清理 |
+| `discarded_snapshots` | 清空的历史原始快照数量；dry-run 为计划数量 |
 
 `providers` 每条记录的字段：
 
@@ -562,7 +566,7 @@ multica agent create --name my-agent --runtime-id "$CODEX_RUNTIME_ID" \
 1. 明文密钥只允许出现在：`provider_secrets` 表的加密列、即将 spawn 的子进程环境变量表。**不允许**出现在：任何 argv、任何日志输出、Handoff Doc、`render-args` 的输出。
 2. `render-env` 的输出本身包含明文（因为下游就是要拿它当 env 用），文档要显式警告调用方"这是敏感输出，不要打印到共享终端/CI 日志"。
 3. 默认配置下（回调式密钥），Codex 的 `config.toml` 片段只写 `auth.command`/`args`，Claude Code 的 settings 文件只写 `apiKeyHelper`，两者都不含任何明文；`env_key` 降级路径通过进程环境注入、不落配置文件，因此也不产生含明文的文件。`env_inline`（明文写入渲染产物）已禁用。
-4. `import_log.raw_snapshot` 里如果 cc-switch 的 `mcp_servers` 表包含凭据（部分 MCP server 配置会带 token），也要在存储前做加密，不能因为「本版本不解析它」就当作普通数据明文存放。
+4. cc-switch 的非供应商数据及原始 settings/meta、MCP/prompts 不持久化；历史加密快照在下一次正式导入时清除。供应商主凭据和必要 HTTP header 值仍须加密。
 5. 所有对外部文件系统路径的操作（尤其是 Handoff Doc 读取、cc-switch 导入文件读取）要做路径校验，防止路径穿越。
 
 ---

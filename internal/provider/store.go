@@ -299,17 +299,79 @@ func (s *Store) SetDisabledExcept(ctx context.Context, target string, seen []str
 	return disabled, nil
 }
 
-func (s *Store) RecordImport(ctx context.Context, hash string, snapshot []byte, seen []string) error {
-	if len(snapshot) > 0 && s.cipher == nil {
-		return fmt.Errorf("密钥库未解锁")
+func (s *Store) RecordImport(ctx context.Context, hash string, seen []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	var sealed []byte
-	if len(snapshot) > 0 {
-		sealed = s.cipher.Seal(snapshot, "import:"+hash)
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `UPDATE import_log SET raw_snapshot=NULL WHERE source='cc-switch' AND raw_snapshot IS NOT NULL`); err != nil {
+		return err
 	}
 	ids, _ := json.Marshal(seen)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO import_log(source,file_hash,imported_at,raw_snapshot,seen_provider_ids) VALUES('cc-switch',?,?,?,?)`, hash, time.Now().UTC().Format(time.RFC3339Nano), sealed, string(ids))
-	return err
+	if _, err = tx.ExecContext(ctx, `INSERT INTO import_log(source,file_hash,imported_at,seen_provider_ids) VALUES('cc-switch',?,?,?)`, hash, time.Now().UTC().Format(time.RFC3339Nano), string(ids)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ImportSnapshotCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM import_log WHERE source='cc-switch' AND raw_snapshot IS NOT NULL`).Scan(&count)
+	return count, err
+}
+
+func (s *Store) SecretNames(ctx context.Context, target, id string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT key_name FROM provider_secrets WHERE target=? AND provider_id=? ORDER BY key_name`, target, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+type ImportCleanup struct {
+	Provider       Provider
+	RemovedSecrets []string
+	Models         []Model
+}
+
+// CleanImports 仅更新导入配置和被剔除的凭据；不替换供应商身份、模型目录或保留的密文。
+func (s *Store) CleanImports(ctx context.Context, plans []ImportCleanup) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, plan := range plans {
+		p := plan.Provider
+		extra, err := json.Marshal(p.Extra)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE providers SET extra_json=?,content_hash=?,updated_at=? WHERE target=? AND id=? AND source='cc-switch-import'`,
+			string(extra), ContentHash(p, plan.Models), time.Now().UTC().Format(time.RFC3339Nano), p.Target, p.ID)
+		if err != nil {
+			return err
+		}
+		if n, err := result.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("待清理的导入供应商已发生变化")
+		}
+		for _, key := range plan.RemovedSecrets {
+			if _, err = tx.ExecContext(ctx, `DELETE FROM provider_secrets WHERE target=? AND provider_id=? AND key_name=?`, p.Target, p.ID, key); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) HardPrune(ctx context.Context) (int64, error) {

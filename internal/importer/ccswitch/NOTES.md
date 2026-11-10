@@ -1,5 +1,16 @@
 # cc-switch SQL 导入验证记录
 
+## 2026-11-10：仅导入模型供应商并清理存量（Spec v0.16）
+
+- 本仓库核对：此前 `extra.codex_config` 已过滤 `projects`/MCP/Skills 等，`extra.claude_settings` 已过滤顶层 hooks 等，但整个 Claude `env` 仍透传；`source_settings`/`source_meta` 保留完整加密原文，`import_log.raw_snapshot` 保留 MCP/prompts。重复导入只覆盖匹配记录，没有对 skip、disabled 或导出中缺失的旧记录应用白名单。以下早期记录中的“全量加密保留”描述已被本节替代。
+- 新导入不查询 `meta`，不读取 MCP/prompts 表的快照，不保存原始 settings。未知 target 仅保留身份、通用 `base_url`/`model`/`api_key`，不再携带任意配置。
+- Claude `env` 仅保留明确的 Anthropic 认证、地址、默认/Haiku/Sonnet/Opus 模型映射、已支持的第三方路由标志、超时及输出/思考 token 预算；非供应商环境变量（包括未知 `ANTHROPIC_*` 路径变量）剔除。主凭据与鉴权类型单独保存，自定义 header 值仍加密。Codex 只保留当前 `model_provider` 选中的定义及模型字段，保留必要的 header 环境引用和加密值；移除未选定义、外部模型目录路径和本地认证命令。以语义白名单过滤，保留 `http://127.0.0.1/...` 和 `org/model`。
+- 正式导入为所有 `cc-switch-import` 记录生成清理计划：同一白名单过滤 Extra，删除原始 settings/meta 和非供应商秘密项；保留模型目录、身份、创建时间、主凭据、必要 header 和状态。只更新发生变化的记录并重算哈希、重新渲染；同名不同 ID 覆盖时也清理旧 ID 产物。日志仅保存导入哈希、时间和已见索引，清空历史 cc-switch 原始快照。
+- `--dry-run` 仅查询供应商、模型和秘密项名称，无需解锁密钥库；报告 `cleaned_providers` 与 `discarded_snapshots`。`skip` 仅跳过供应商值覆盖，不跳过旧非供应商数据清理；空导出同样能触发清理。manual 数据仅按已有覆盖规则处理，原生配置不被 import 修改。
+- 自动回归使用虚构密钥和隔离目录：`TestImportOnlyProviderData` 覆盖 Windows/Linux 路径、projects/hooks/MCP/Skills/插件、未知环境变量、模型名斜杠和本机代理；`TestImportCleansHistoricalLocalConfiguration` 覆盖 overwrite/skip/空导出、disabled/未知 target、加密历史快照清理、只读 dry-run（故意提供错误口令）、模型和凭据保留、渲染缓存更新、manual 与原生配置保护及重复导入幂等。完整验证命令和结果见 `.ai/docs/implementation-status.md`。
+
+## 早期验证记录
+
 验证时间：2026-09-17；2026-09-20 按 Relay spec v0.7 复核。来源为本地 cc-switch 源码和用户指定的真实 SQL 导出；未将导出或其中凭据复制进仓库。
 
 - 2026-09-20 对照的 cc-switch 源码提交为 `06082e189d65e6d6dbadc35dacdac1ce6c79d89a`，工作树无本地修改。当前 `src-tauri/src/database/schema.rs` 中 `providers` 的基础表定义包含 `id`、`app_type`、`name`、`settings_config`、`website_url`、`category`、`created_at`、`sort_index`、`notes`、`icon`、`icon_color`、`meta`、`is_current`、`in_failover_queue`，主键为 `(id, app_type)`；迁移后的真实数据库可能有更多列，因此 Relay 不把这份列表固化为导入契约。

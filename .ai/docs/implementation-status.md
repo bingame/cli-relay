@@ -2,6 +2,14 @@
 
 日期：2026-09-17；最近更新：2026-11-10。依据 `relay-spec.md`，使用 Go / Cobra / modernc SQLite / go-keyring。文档使用中文；未修改 cc-switch、Multica 仓库，也未自动切换用户的真实原生配置。
 
+## 2026-11-10：cc-switch 仅导入模型供应商及存量清理（Spec v0.16）
+
+- 版本依据：`6572e7b` 上的本次工作区变更；契约见 `relay-spec.md` §6，原实现差异和过滤边界见 `internal/importer/ccswitch/NOTES.md`。
+- 新导入收紧 Claude env 和 Codex 所选供应商字段，不保存 projects/hooks/MCP/Skills/插件/本地目录以及原始 settings/meta、MCP/prompts 快照。正式导入自动清理旧 cc-switch 记录、非供应商秘密项和原始快照，更新哈希及渲染产物；覆盖 skip、disabled、未知 target 和本次缺失的旧记录。模型、必要凭据、状态和未覆盖 manual 数据保留。
+- `go test ./internal/importer/ccswitch ./internal/provider ./internal/cli` 的首轮发现新增测试将“未声明模型”的 nil 与数据库空数组混作同一内容哈希；调整为只对实际清理的存量记录断言重算哈希。随后 `go test ./internal/cli -run TestImportCleansHistoricalLocalConfiguration -count=1`、`go test ./...`、`go vet ./...`、`go build -trimpath -o bin/relay.exe ./cmd/relay`、`git diff --check` 均退出 0。
+- 新二进制隔离验证（虚构凭据、仓库 sample.sql）：新导入 3 个供应商；模拟旧配置和旧秘密项/快照后，用 `--on-conflict skip` 正式导入，清理 2 条记录和 1 份快照。数据库与渲染文件中不再含注入的外机路径；dry-run 数据库字节不变，重复导入清理项为空，原生配置目录未被创建。最终验证退出 0；首次辅助 Python 验证因 SQLite 连接未关闭而无法回收临时目录，修正连接生命周期后复验通过。
+- 所有测试只使用隔离目录和虚构数据，未运行真实供应商导入或请求。成功测试目录自动回收；已逐文件清理两处失败验证遗留的 3 个文件及其空目录。保留 `bin/relay.exe` 供用户使用（Git 忽略），SHA-256：`1797308660b136315598115f8eea3da93b9407287551b46dbf67207f71df5cb7`。用户已有 `.zcode/` 保持原状。
+
 ## 2026-11-10：v0.1.6 发布验证（Spec v0.15）
 
 - 发布范围：包含此前未推送的 Claude 全局认证冲突与 Windows 回调引号修复、`relay notify` 远程通知，以及本次 Codex 适配更新。普通 CLI 使用独立 `CODEX_HOME`，共享原生会话、SQLite 和 Skills；模型与推理档位按供应商保存。新增 `--runtime app-server` 与包装模式的独立供应商参数，修复残缺托管标记阻断切换的问题。契约及上游差异详见 `relay-spec.md` 与 `internal/adapter/codex/NOTES.md`。

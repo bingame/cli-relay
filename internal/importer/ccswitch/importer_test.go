@@ -40,12 +40,12 @@ func TestParseRealisticDump(t *testing.T) {
 	if claude.Provider.BaseURL != "https://claude.example.test" || claude.Provider.Model != "claude-example" {
 		t.Fatal("Claude model mapping failed")
 	}
-	if claude.Secrets["api_key"] != "fake-claude-key" || claude.Secrets["env:OTHER_SECRET"] != "fake-extra-secret" || claude.Secrets["source_meta"] == "" {
-		t.Fatal("Claude secrets were not preserved")
+	if claude.Secrets["api_key"] != "fake-claude-key" || len(claude.Secrets) != 2 {
+		t.Fatal("Claude 应只保留主凭据及鉴权类型")
 	}
 	settings := claude.Provider.Extra["claude_settings"].(map[string]any)
-	if settings["env"].(map[string]any)["SAFE_FLAG"] != "yes" {
-		t.Fatal("nonsecret settings were lost")
+	if settings["env"].(map[string]any)["SAFE_FLAG"] != nil {
+		t.Fatal("非供应商环境变量不应保留")
 	}
 	if settings["permissions"] != nil || settings["hooks"] != nil {
 		t.Fatal("spec §6 白名单：permissions/hooks 等运行环境配置不应入库")
@@ -63,7 +63,7 @@ func TestParseRealisticDump(t *testing.T) {
 		t.Fatal("Codex headers were not separated from credential references")
 	}
 	other := result.Providers[2]
-	if !other.Provider.Supports("gemini") || !provider.ValidID(other.Provider.ID) || other.OriginalID != "../无效 ID" || other.Secrets["source_settings"] == "" {
+	if !other.Provider.Supports("gemini") || !provider.ValidID(other.Provider.ID) || other.OriginalID != "../无效 ID" || other.Secrets["api_key"] != "fake-other-key" {
 		t.Fatal("unsupported target or original ID was lost")
 	}
 	for _, entry := range result.Providers {
@@ -72,12 +72,11 @@ func TestParseRealisticDump(t *testing.T) {
 			t.Fatal("provider metadata leaked fixture credentials")
 		}
 	}
-	var snapshot map[string]rawTable
-	if err := json.Unmarshal(result.Snapshot, &snapshot); err != nil || len(snapshot["mcp_servers"].Rows) != 1 || len(snapshot["prompts"].Rows) != 1 {
-		t.Fatal("raw table snapshot missing")
-	}
-	if !strings.Contains(string(result.Snapshot), "fake-mcp-secret") || snapshot["prompts"].Rows[0]["content"] != "多行\n提示正文" {
-		t.Fatal("raw snapshot must preserve original data for encrypted persistence")
+	encoded, _ := json.Marshal(result)
+	for _, forbidden := range []string{"fake-mcp-secret", "fake-meta-secret", "fake-extra-secret", "fake-other-meta", "source_settings", "source_meta", "多行", "arbitrary", "unused.example.test"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("导入结果保留了非供应商数据：%s", forbidden)
+		}
 	}
 }
 
@@ -211,7 +210,7 @@ func TestParseEmptyDumpWithBOMAndNoOptionalTables(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "import.sql")
 	writeFile(t, path, "\ufeff"+exportHeader+"\r\n"+minimalSQL)
 	result, err := Parse(context.Background(), path)
-	if err != nil || len(result.Providers) != 0 || result.Snapshot == nil {
+	if err != nil || len(result.Providers) != 0 {
 		t.Fatal("valid empty export failed")
 	}
 }
@@ -318,14 +317,14 @@ func TestKnownCredentialsCannotBeCopiedToPublicConfiguration(t *testing.T) {
 		t.Fatal("known credential survived public configuration filtering")
 	}
 	settings := entry.Provider.Extra["claude_settings"].(map[string]any)
-	if settings["env"].(map[string]any)["SAFE_FLAG"] != "yes" {
-		t.Fatal("白名单应保留 env 中的非凭据语义字段")
+	if settings["env"].(map[string]any)["SAFE_FLAG"] != nil {
+		t.Fatal("白名单不应保留非供应商环境变量")
 	}
 	if settings["safe"] != nil || settings["hooks"] != nil || settings["description"] != nil || strings.Contains(string(encoded), "echo harmless") {
 		t.Fatal("spec §6 白名单：hooks 等运行环境配置应整体剔除，含无害内容")
 	}
-	if !strings.Contains(entry.Secrets["source_settings"], "echo fake-known-value") {
-		t.Fatal("encrypted source backup lost original hook")
+	if entry.Secrets["source_settings"] != "" {
+		t.Fatal("不应保留含 hook 的原始快照")
 	}
 	for _, field := range []string{"id", "name", "app_type"} {
 		bad := validRow()
@@ -339,16 +338,16 @@ func TestKnownCredentialsCannotBeCopiedToPublicConfiguration(t *testing.T) {
 
 func TestCredentialCopyInsideWhitelistedFieldIsStripped(t *testing.T) {
 	row := validRow()
-	row["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-known-value","SAFE_NOTE":"prefix fake-known-value suffix","SAFE_FLAG":"yes"}}`
+	row["settings_config"] = `{"env":{"ANTHROPIC_AUTH_TOKEN":"fake-known-value","ANTHROPIC_DEFAULT_OPUS_MODEL":"prefix fake-known-value suffix","ANTHROPIC_DEFAULT_HAIKU_MODEL":"org/model"}}`
 	entry, err := parseEntry(row)
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := entry.Provider.Extra["claude_settings"].(map[string]any)["env"].(map[string]any)
-	if env["SAFE_FLAG"] != "yes" {
+	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "org/model" {
 		t.Fatal("无关字段被误删")
 	}
-	if env["SAFE_NOTE"] != nil || len(entry.Warnings) != 1 {
+	if env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != nil || len(entry.Warnings) != 1 {
 		t.Fatal("白名单字段内的凭据副本未被剥离")
 	}
 	encoded, _ := json.Marshal(entry.Provider)
